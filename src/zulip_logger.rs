@@ -146,21 +146,19 @@ async fn send_batch(
         return;
     }
 
-    let mut message = String::from("```\n");
+    let mut message = String::new();
 
     for log in buffer.drain(..) {
-        let level_str = match log.level {
-            Level::ERROR => "ERROR",
-            Level::WARN => "WARN ",
-            Level::INFO => "INFO ",
-            Level::DEBUG => "DEBUG",
-            Level::TRACE => "TRACE",
+        let level_emoji = match log.level {
+            Level::ERROR => "🔴",
+            Level::WARN => "🟡",
+            Level::INFO => "🔵",
+            Level::DEBUG => "⚪",
+            Level::TRACE => "⚫",
         };
 
-        message.push_str(&format!("[{}] {}: {}\n", level_str, log.target, log.message));
+        message.push_str(&format!("{} **{}** {}: {}\n", level_emoji, log.level, log.target, log.message));
     }
-
-    message.push_str("```");
 
     // Best effort - don't propagate errors
     let _ = zulip.send_message(channel, topic, &message).await;

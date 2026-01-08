@@ -218,6 +218,70 @@ impl ZulipClient {
         Ok(())
     }
 
+    /// Add a reaction emoji to a message
+    pub async fn add_reaction(&self, message_id: i64, emoji_name: &str) -> Result<()> {
+        let url = format!(
+            "{}/api/v1/messages/{}/reactions",
+            self.config.site, message_id
+        );
+
+        let mut params = HashMap::new();
+        params.insert("emoji_name", emoji_name);
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&params)
+            .send()
+            .await
+            .map_err(|e| ZwobotError::ZulipApi(format!("Failed to add reaction: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ZwobotError::ZulipApi(format!(
+                "Failed to add reaction ({}): {}",
+                status, text
+            )));
+        }
+
+        trace!("Added reaction {} to message {}", emoji_name, message_id);
+        Ok(())
+    }
+
+    /// Remove a reaction emoji from a message
+    pub async fn remove_reaction(&self, message_id: i64, emoji_name: &str) -> Result<()> {
+        let url = format!(
+            "{}/api/v1/messages/{}/reactions",
+            self.config.site, message_id
+        );
+
+        let mut params = HashMap::new();
+        params.insert("emoji_name", emoji_name);
+
+        let response = self
+            .client
+            .delete(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .query(&params)
+            .send()
+            .await
+            .map_err(|e| ZwobotError::ZulipApi(format!("Failed to remove reaction: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ZwobotError::ZulipApi(format!(
+                "Failed to remove reaction ({}): {}",
+                status, text
+            )));
+        }
+
+        trace!("Removed reaction {} from message {}", emoji_name, message_id);
+        Ok(())
+    }
+
     /// Register a queue for real-time events
     pub async fn register_queue(&self, event_types: &[&str]) -> Result<(String, i64)> {
         let url = format!("{}/api/v1/register", self.config.site);

@@ -168,6 +168,8 @@ async fn handle_message(
     }
 
     let topic = message.subject.clone();
+    let message_id = message.id;
+
     info!(
         "Received message in {}/{} from {}: {}",
         stream_name,
@@ -175,6 +177,10 @@ async fn handle_message(
         message.sender_full_name,
         message.content.chars().take(50).collect::<String>()
     );
+
+    // Add progress indicator (working emoji)
+    debug!("Adding progress indicator to message {}", message_id);
+    let _ = zulip.add_reaction(message_id, "working").await;
 
     // Handle bot-control topic
     if topic == "bot-control" {
@@ -186,7 +192,11 @@ async fn handle_message(
             coordinators: coordinators.clone(),
             app_config: app_config.clone(),
         };
-        return bot_control::handle_control_message(&ctx, &message, "bot-control").await;
+        let result = bot_control::handle_control_message(&ctx, &message, "bot-control").await;
+        // Remove progress indicator and add completion
+        let _ = zulip.remove_reaction(message_id, "working").await;
+        let _ = zulip.add_reaction(message_id, "white_check_mark").await;
+        return result;
     }
 
     // Get topic config
@@ -355,6 +365,11 @@ async fn handle_message(
     debug!("Saving world state and coordinator");
     save_world(&worlds, &topic, world, &app_config.world_data_path).await?;
     save_coordinator(&coordinators, &topic, coordinator).await;
+
+    // Remove progress indicator and add completion emoji
+    debug!("Removing progress indicator from message {}", message_id);
+    let _ = zulip.remove_reaction(message_id, "working").await;
+    let _ = zulip.add_reaction(message_id, "white_check_mark").await;
 
     debug!("Message handling complete for topic: {}", topic);
     Ok(())
