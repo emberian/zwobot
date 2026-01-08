@@ -1,0 +1,33 @@
+[package]
+name = "zwobot"
+version = "0.1.0"
+edition = "2021"
+description = "Zulip bot serving local LLMs via llama.cpp"
+license = "MIT"
+
+[dependencies]
+# LLM - llama.cpp bindings (reuse from qwobot)
+llama-cpp-2 = "0.1"
+hf-hub = "0.3"
+
+# Async
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for Zulip API
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Random
+rand = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
