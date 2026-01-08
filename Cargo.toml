@@ -5,6 +5,14 @@ edition = "2021"
 description = "Zulip bot serving local LLMs via llama.cpp"
 license = "MIT"
 
+[[bin]]
+name = "zwobot"
+path = "src/main.rs"
+
+[[bin]]
+name = "download_model"
+path = "src/bin/download_model.rs"
+
 [dependencies]
 # LLM - llama.cpp bindings (reuse from qwobot)
 llama-cpp-2 = "0.1"

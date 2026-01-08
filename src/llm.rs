@@ -74,6 +74,8 @@ fn resolve_model_path(model_id: &str, quantization: &str) -> Result<PathBuf> {
         let raw_model_name = model_id.split('/').last().unwrap_or("model");
         let model_name = raw_model_name.trim_end_matches("-GGUF");
         let model_name_lower = model_name.to_lowercase();
+        // Convert decimal points to underscores (e.g., "1.7B" -> "1_7b")
+        let model_name_underscore = model_name_lower.replace('.', "_");
         let quant_upper = quantization.to_uppercase().replace('-', "_");
         let filenames = [
             // Uppercase quant variants
@@ -82,12 +84,18 @@ fn resolve_model_path(model_id: &str, quantization: &str) -> Result<PathBuf> {
             // Lowercase with underscore (most common on HF)
             format!("{}-{}.gguf", model_name_lower, quant_lower_underscore),
             format!("{}.{}.gguf", model_name_lower, quant_lower_underscore),
+            // With decimal -> underscore conversion
+            format!("{}-{}.gguf", model_name_underscore, quant_lower_underscore),
+            format!("{}_{}.gguf", model_name_underscore, quant_lower_underscore),
             // Lowercase with hyphen
             format!("{}-{}.gguf", model_name, quant_lower_hyphen),
             format!("{}-{}.gguf", model_name_lower, quant_lower_hyphen),
             // Just quant name
             format!("{}.gguf", quant_lower_underscore),
             format!("{}.gguf", quant_lower_hyphen),
+            // Common GGUF patterns
+            format!("ggml-model-{}.gguf", quant_lower_underscore),
+            format!("{}-gguf-{}.gguf", model_name_underscore, quant_lower_underscore),
         ];
 
         // Try GGUF repo first
@@ -160,6 +168,8 @@ async fn resolve_model_path_with_progress(
             let raw_model_name = model_id.split('/').last().unwrap_or("model");
             let model_name = raw_model_name.trim_end_matches("-GGUF");
             let model_name_lower = model_name.to_lowercase();
+            // Convert decimal points to underscores (e.g., "1.7B" -> "1_7b")
+            let model_name_underscore = model_name_lower.replace('.', "_");
             let quant_upper = quantization.to_uppercase().replace('-', "_");
             let filenames = [
                 // Uppercase quant variants
@@ -168,12 +178,18 @@ async fn resolve_model_path_with_progress(
                 // Lowercase with underscore (most common on HF)
                 format!("{}-{}.gguf", model_name_lower, quant_lower_underscore),
                 format!("{}.{}.gguf", model_name_lower, quant_lower_underscore),
+                // With decimal -> underscore conversion
+                format!("{}-{}.gguf", model_name_underscore, quant_lower_underscore),
+                format!("{}_{}.gguf", model_name_underscore, quant_lower_underscore),
                 // Lowercase with hyphen
                 format!("{}-{}.gguf", model_name, quant_lower_hyphen),
                 format!("{}-{}.gguf", model_name_lower, quant_lower_hyphen),
                 // Just quant name
                 format!("{}.gguf", quant_lower_underscore),
                 format!("{}.gguf", quant_lower_hyphen),
+                // Common GGUF patterns
+                format!("ggml-model-{}.gguf", quant_lower_underscore),
+                format!("{}-gguf-{}.gguf", model_name_underscore, quant_lower_underscore),
             ];
 
             // Try GGUF repo first

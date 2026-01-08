@@ -1,3 +1,4 @@
+mod bot_control;
 mod config;
 mod error;
 mod llm;
@@ -7,7 +8,9 @@ mod tools;
 mod turn;
 mod world;
 mod zulip;
+mod zulip_logger;
 
+use bot_control::ControlContext;
 use config::{AppConfig, TopicConfig, ZulipConfig};
 use llm::LlmEngine;
 use prompts::{build_turn_prompt, get_active_scene_output};
@@ -17,10 +20,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tools::{execute_tool, parse_tool_call};
-use tracing::{error, info};
+use tracing::{error, info, Level};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use turn::TurnCoordinator;
 use world::WorldState;
 use zulip::{Message, ZulipClient};
+use zulip_logger::ZulipLayer;
 
 type ModelCache = Arc<RwLock<HashMap<String, Arc<LlmEngine>>>>;
 type WorldCache = Arc<RwLock<HashMap<String, WorldState>>>;
@@ -29,26 +35,36 @@ type SceneManagerCache = Arc<RwLock<SceneManager>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("zwobot=info".parse()?),
-        )
-        .init();
-
-    info!("Starting zwobot...");
-
-    // Load configuration
+    // Load configuration first (before logging, so we can log to Zulip)
     let app_config = AppConfig::load()?;
     let zulip_config = ZulipConfig::load()?;
 
-    info!("Configuration loaded");
-    info!("Monitoring channel: {}", app_config.channel);
-
     // Connect to Zulip
     let zulip = Arc::new(ZulipClient::new(zulip_config).await?);
-    info!("Connected to Zulip");
+
+    // Initialize logging with both stdout and Zulip
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("zwobot=info".parse()?);
+
+    let fmt_layer = tracing_subscriber::fmt::layer();
+
+    // Create Zulip logging layer (logs WARN and above to bot-logs topic)
+    let (zulip_layer, _log_task) = ZulipLayer::new(
+        zulip.clone(),
+        app_config.channel.clone(),
+        "bot-logs".to_string(),
+        Level::WARN,
+    );
+
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .with(zulip_layer)
+        .init();
+
+    info!("Starting zwobot...");
+    info!("Configuration loaded");
+    info!("Monitoring channel: {}", app_config.channel);
 
     // Model cache: topic -> LlmEngine
     let models: ModelCache = Arc::new(RwLock::new(HashMap::new()));
@@ -159,6 +175,18 @@ async fn handle_message(
         message.sender_full_name,
         message.content.chars().take(50).collect::<String>()
     );
+
+    // Handle bot-control topic
+    if topic == "bot-control" {
+        let ctx = ControlContext {
+            zulip: zulip.clone(),
+            models: models.clone(),
+            worlds: worlds.clone(),
+            coordinators: coordinators.clone(),
+            app_config: app_config.clone(),
+        };
+        return bot_control::handle_control_message(&ctx, &message, "bot-control").await;
+    }
 
     // Get topic config
     let topic_config = app_config.get_topic_config(&topic);
