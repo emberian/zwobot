@@ -1,0 +1,28 @@
+# Zwobot Configuration
+
+# Zulip settings (credentials come from zuliprc file in parent directory)
+channel = "clankerville"
+
+# Topic to model mappings
+# Each topic can have its own model configuration
+# Format: topic_name = { model_id = "...", quantization = "...", max_tokens = ..., temperature = ... }
+[topics]
+
+[topics.general]
+model_id = "Qwen/Qwen3-0.6B"
+quantization = "Q8_0"
+max_tokens = 1024
+temperature = 0.7
+
+[topics."tech-talk"]
+model_id = "Qwen/Qwen3-1.7B"
+quantization = "Q4_K_M"
+max_tokens = 2048
+temperature = 0.8
+
+# Default model configuration for topics not explicitly configured
+[default_topic]
+model_id = "Qwen/Qwen3-0.6B"
+quantization = "Q8_0"
+max_tokens = 1024
+temperature = 0.7
