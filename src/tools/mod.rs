@@ -1,5 +1,6 @@
 pub mod definitions;
 pub mod executor;
+pub mod interaction;
 pub mod inventory;
 pub mod matching;
 pub mod navigation;

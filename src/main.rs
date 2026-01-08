@@ -3,10 +3,11 @@ mod error;
 mod llm;
 mod prompts;
 mod tools;
+mod turn;
 mod world;
 mod zulip;
 
-use config::{AppConfig, Character, TopicConfig, ZulipConfig};
+use config::{AppConfig, TopicConfig, ZulipConfig};
 use llm::LlmEngine;
 use prompts::build_turn_prompt;
 use smol_str::SmolStr;
@@ -15,11 +16,13 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tools::{execute_tool, parse_tool_call};
 use tracing::{error, info};
+use turn::TurnCoordinator;
 use world::WorldState;
 use zulip::{Message, ZulipClient};
 
 type ModelCache = Arc<RwLock<HashMap<String, Arc<LlmEngine>>>>;
 type WorldCache = Arc<RwLock<HashMap<String, WorldState>>>;
+type CoordinatorCache = Arc<RwLock<HashMap<String, TurnCoordinator>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,6 +53,9 @@ async fn main() -> anyhow::Result<()> {
     // World state cache: topic -> WorldState
     let worlds: WorldCache = Arc::new(RwLock::new(HashMap::new()));
 
+    // Turn coordinator cache: topic -> TurnCoordinator
+    let coordinators: CoordinatorCache = Arc::new(RwLock::new(HashMap::new()));
+
     // Register for real-time message events
     let (queue_id, mut last_event_id) = zulip.register_queue(&["message"]).await?;
     info!("Listening for messages...");
@@ -68,10 +74,11 @@ async fn main() -> anyhow::Result<()> {
                             let app_config = app_config.clone();
                             let models = models.clone();
                             let worlds = worlds.clone();
+                            let coordinators = coordinators.clone();
 
                             tokio::spawn(async move {
                                 if let Err(e) =
-                                    handle_message(zulip, app_config, models, worlds, message).await
+                                    handle_message(zulip, app_config, models, worlds, coordinators, message).await
                                 {
                                     error!("Error handling message: {}", e);
                                 }
@@ -110,6 +117,7 @@ async fn handle_message(
     app_config: AppConfig,
     models: ModelCache,
     worlds: WorldCache,
+    coordinators: CoordinatorCache,
     message: Message,
 ) -> anyhow::Result<()> {
     // Get stream name from display_recipient
@@ -152,6 +160,9 @@ async fn handle_message(
     // Get or load world state for this topic
     let mut world = get_or_load_world(&worlds, &topic, &app_config.world_data_path).await?;
 
+    // Get or create turn coordinator for this topic
+    let mut coordinator = get_or_create_coordinator(&coordinators, &topic).await;
+
     // Get conversation history
     let history = zulip
         .get_topic_messages(&app_config.channel, &topic)
@@ -173,8 +184,8 @@ async fn handle_message(
         // Ensure character exists in world
         ensure_character_in_world(&mut world, &character_name);
 
-        // Build prompt with world state and tools
-        let prompt = build_turn_prompt(&world, &character, &history, zulip.bot_id());
+        // Build prompt with world state, tools, and recent actions
+        let prompt = build_turn_prompt(&world, &character, &history, zulip.bot_id(), Some(&coordinator));
 
         info!("Generating response for character: {}", character.name);
 
@@ -218,6 +229,13 @@ async fn handle_message(
             }
         };
 
+        // Record action in coordinator for other characters to see
+        coordinator.record_action(
+            character_name.clone(),
+            format!("{} {}", tool_call.tool_name, tool_call.args_joined()).into(),
+            result.summary.clone().into(),
+        );
+
         // Format response: thinking + tool result
         let mut formatted_response = String::new();
 
@@ -243,8 +261,12 @@ async fn handle_message(
         );
     }
 
-    // Save world state after all characters have acted
-    save_world(&worlds, &topic, world).await?;
+    // Advance turn after all characters have acted
+    coordinator.advance_turn();
+
+    // Save world state and coordinator
+    save_world(&worlds, &topic, world, &app_config.world_data_path).await?;
+    save_coordinator(&coordinators, &topic, coordinator).await;
 
     Ok(())
 }
@@ -292,7 +314,7 @@ async fn get_or_load_model(
 async fn get_or_load_world(
     worlds: &WorldCache,
     topic: &str,
-    world_data_path: &str,
+    template_path: &str,
 ) -> anyhow::Result<WorldState> {
     // Check if world is already loaded for this topic
     {
@@ -302,9 +324,9 @@ async fn get_or_load_world(
         }
     }
 
-    // World not loaded, load from file
-    info!("Loading world state from {}", world_data_path);
-    let world = WorldState::load_from_file(world_data_path)?;
+    // World not loaded - try to load from save file, fall back to template
+    let save_path = WorldState::save_path_for_topic(topic);
+    let world = WorldState::load_or_create(&save_path, template_path)?;
 
     // Store in cache
     {
@@ -321,17 +343,53 @@ async fn save_world(
     worlds: &WorldCache,
     topic: &str,
     world: WorldState,
+    _template_path: &str,
 ) -> anyhow::Result<()> {
+    // Save to disk
+    let save_path = WorldState::save_path_for_topic(topic);
+    world.save_to_file(&save_path)?;
+    info!("World state saved to {}", save_path);
+
     // Update cache
     {
         let mut worlds_write = worlds.write().await;
         worlds_write.insert(topic.to_string(), world);
     }
 
-    // Note: We don't save to disk here - world state persists in memory per topic
-    // In Phase 4+, we could add periodic saving or save on significant events
-
     Ok(())
+}
+
+async fn get_or_create_coordinator(
+    coordinators: &CoordinatorCache,
+    topic: &str,
+) -> TurnCoordinator {
+    // Check if coordinator exists for this topic
+    {
+        let coordinators_read = coordinators.read().await;
+        if let Some(coordinator) = coordinators_read.get(topic) {
+            return coordinator.clone();
+        }
+    }
+
+    // Create new coordinator
+    let coordinator = TurnCoordinator::new();
+
+    // Store in cache
+    {
+        let mut coordinators_write = coordinators.write().await;
+        coordinators_write.insert(topic.to_string(), coordinator.clone());
+    }
+
+    coordinator
+}
+
+async fn save_coordinator(
+    coordinators: &CoordinatorCache,
+    topic: &str,
+    coordinator: TurnCoordinator,
+) {
+    let mut coordinators_write = coordinators.write().await;
+    coordinators_write.insert(topic.to_string(), coordinator);
 }
 
 fn ensure_character_in_world(world: &mut WorldState, character_name: &SmolStr) {

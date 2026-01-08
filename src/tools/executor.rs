@@ -1,4 +1,5 @@
 use super::definitions::{ToolCall, ToolResult};
+use super::interaction::{tool_attack, tool_say, tool_talk, tool_use};
 use super::inventory::{tool_drop, tool_equip, tool_inventory, tool_take};
 use super::navigation::{tool_examine, tool_go, tool_look};
 use crate::world::WorldState;
@@ -24,9 +25,15 @@ pub fn execute_tool(
         "drop" => tool_drop(world, character, call),
         "equip" | "wear" | "wield" => tool_equip(world, character, call),
 
+        // Interaction tools
+        "talk" | "speak" => tool_talk(world, character, call),
+        "say" => tool_say(call),
+        "use" | "consume" | "drink" | "eat" => tool_use(world, character, call),
+        "attack" | "hit" | "fight" => tool_attack(world, character, call),
+
         // Unknown tool
         _ => Ok(ToolResult::failure(format!(
-            "Unknown tool: '{}'. Available tools: look, examine, go, inventory, take, drop, equip",
+            "Unknown tool: '{}'. Try: look, examine, go, inventory, take, drop, equip, talk, say, use, attack",
             call.tool_name
         ))),
     }
@@ -99,7 +106,40 @@ pub fn get_available_tools(world: &WorldState, character: &SmolStr) -> String {
         if has_equippable {
             tools.push_str("- `<tool>equip ITEM</tool>` - Equip an item from inventory\n");
         }
+
+        // Use consumables
+        let has_consumable = char_state.inventory.iter().any(|id| {
+            world
+                .object_defs
+                .get(id)
+                .map(|obj| obj.tags.iter().any(|t| t.as_str() == "consumable"))
+                .unwrap_or(false)
+        });
+
+        if has_consumable {
+            tools.push_str("- `<tool>use ITEM</tool>` - Use a consumable item\n");
+        }
     }
+
+    // Talk to NPCs
+    if !room.npcs.is_empty() {
+        let npc_names: Vec<String> = room
+            .npcs
+            .iter()
+            .filter_map(|id| world.npc_defs.get(id))
+            .map(|npc| npc.name.to_string())
+            .collect();
+
+        tools.push_str("- `<tool>talk NPC</tool>` - Talk to someone. ");
+        tools.push_str("NPCs here: ");
+        tools.push_str(&npc_names.join(", "));
+        tools.push_str("\n");
+
+        tools.push_str("- `<tool>attack TARGET</tool>` - Attack someone\n");
+    }
+
+    // Say something
+    tools.push_str("- `<tool>say MESSAGE</tool>` - Say something aloud\n");
 
     tools.push_str("\nUse ONLY ONE tool per response.");
 

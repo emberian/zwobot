@@ -3,5 +3,6 @@ pub mod error;
 pub mod llm;
 pub mod prompts;
 pub mod tools;
+pub mod turn;
 pub mod world;
 pub mod zulip;

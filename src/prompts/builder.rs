@@ -1,5 +1,6 @@
 use crate::config::Character;
 use crate::tools::get_available_tools;
+use crate::turn::TurnCoordinator;
 use crate::world::WorldState;
 use crate::zulip::Message;
 use smol_str::SmolStr;
@@ -10,6 +11,7 @@ pub fn build_turn_prompt(
     character: &Character,
     history: &[Message],
     bot_id: i64,
+    coordinator: Option<&TurnCoordinator>,
 ) -> String {
     let mut prompt = String::new();
 
@@ -119,7 +121,16 @@ pub fn build_turn_prompt(
         }
     }
 
-    // 4. Conversation history (recent messages)
+    // 4. Recent actions by other characters
+    if let Some(coord) = coordinator {
+        if let Some(actions_str) = coord.format_recent_actions_for(&character.name) {
+            prompt.push_str("**Recent Actions by Others:**\n");
+            prompt.push_str(&actions_str);
+            prompt.push_str("\n\n");
+        }
+    }
+
+    // 5. Conversation history (recent messages)
     if !history.is_empty() {
         prompt.push_str("**Recent Conversation:**\n");
 
@@ -142,12 +153,12 @@ pub fn build_turn_prompt(
         prompt.push_str("\n");
     }
 
-    // 5. Available tools
+    // 6. Available tools
     let tools_list = get_available_tools(world, &character.name.clone().into());
     prompt.push_str(&tools_list);
     prompt.push_str("\n\n");
 
-    // 6. Instructions
+    // 7. Instructions
     prompt.push_str("**Instructions:**\n");
     prompt.push_str("1. Think about what you want to do based on the situation\n");
     prompt.push_str("2. Choose ONE tool to use\n");
