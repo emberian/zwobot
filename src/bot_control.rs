@@ -8,6 +8,7 @@
 //! - `eval <rust_expr>` - Evaluate a Rust expression (future)
 
 use crate::config::AppConfig;
+use crate::llm::LlmEngine;
 use crate::zulip::{Message, ZulipClient};
 use anyhow::Result;
 use std::collections::HashMap;
@@ -15,7 +16,18 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-type ModelCache = Arc<RwLock<HashMap<String, Arc<crate::llm::LlmEngine>>>>;
+/// Model loading state - tracks whether a model is loading, loaded, or failed
+#[derive(Clone)]
+pub enum ModelState {
+    /// Model is currently being downloaded/loaded
+    Loading,
+    /// Model is ready to use
+    Ready(Arc<LlmEngine>),
+    /// Model failed to load
+    Failed(String),
+}
+
+type ModelCache = Arc<RwLock<HashMap<String, ModelState>>>;
 type WorldCache = Arc<RwLock<HashMap<String, crate::world::WorldState>>>;
 type CoordinatorCache = Arc<RwLock<HashMap<String, crate::turn::TurnCoordinator>>>;
 
@@ -113,11 +125,15 @@ async fn handle_topics(ctx: &ControlContext) -> Result<String> {
 
     for topic in topics {
         let topic_config = ctx.app_config.get_topic_config(topic);
-        let has_model = models.contains_key(topic);
+        let model_status = models.get(topic).map(|s| match s {
+            ModelState::Loading => "⏳ loading",
+            ModelState::Ready(_) => "✓ ready",
+            ModelState::Failed(_) => "✗ failed",
+        }).unwrap_or("");
         let has_world = worlds.contains_key(topic);
 
         response.push_str(&format!(
-            "**{}**\n  Model: {} ({})\n  Characters: {}\n  Cached: {} {}\n\n",
+            "**{}**\n  Model: {} ({})\n  Characters: {}\n  Status: {} {}\n\n",
             topic,
             topic_config.model_id,
             topic_config.quantization,
@@ -127,7 +143,7 @@ async fn handle_topics(ctx: &ControlContext) -> Result<String> {
                 .map(|c| c.name.as_str())
                 .collect::<Vec<_>>()
                 .join(", "),
-            if has_model { "✓ model" } else { "" },
+            model_status,
             if has_world { "✓ world" } else { "" },
         ));
     }

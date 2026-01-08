@@ -9,14 +9,14 @@ channel = "clankerville"
 
 # Example: Single character topic
 [topics.general]
-model_id = "Qwen/Qwen3-0.6B"
+model_id = "Qwen/Qwen2.5-0.5B-Instruct"
 quantization = "Q8_0"
 max_tokens = 1024
 temperature = 0.7
 
 # Example: Topic with a custom character
 [topics."tech-talk"]
-model_id = "Qwen/Qwen3-1.7B"
+model_id = "Qwen/Qwen2.5-1.5B-Instruct"
 quantization = "Q4_K_M"
 max_tokens = 2048
 temperature = 0.8
@@ -27,7 +27,7 @@ system_prompt = "You are TechBot, a friendly and knowledgeable technical assista
 
 # Example: Topic with multiple characters for roleplaying
 [topics.tavern]
-model_id = "Qwen/Qwen3-1.7B"
+model_id = "Qwen/Qwen2.5-1.5B-Instruct"
 quantization = "Q4_K_M"
 max_tokens = 1024
 temperature = 0.9

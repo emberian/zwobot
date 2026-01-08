@@ -1,15 +1,14 @@
 use super::definitions::{ToolCall, ToolResult};
 use super::matching::matches_name;
-use crate::scenes::{enter_scene, format_scene_for_zulip, SceneManager};
 use crate::world::WorldState;
 use smol_str::SmolStr;
 
 /// Execute the 'talk' tool - talk to an NPC in the current room
+/// Returns NPC info for the LLM to generate dialogue
 pub fn tool_talk(
-    world: &mut WorldState,
+    world: &WorldState,
     character: &SmolStr,
     call: &ToolCall,
-    scene_manager: Option<&mut SceneManager>,
 ) -> anyhow::Result<ToolResult> {
     let target = call.args_joined();
     if target.is_empty() {
@@ -45,58 +44,14 @@ pub fn tool_talk(
         .get(&npc_id)
         .ok_or_else(|| anyhow::anyhow!("NPC not found"))?;
 
-    let npc_name = npc.name.clone();
-    let npc_description = npc.description.clone();
-    let dialogue_scene = npc.dialogue_scene.clone();
-
-    // Check for dialogue scene
-    if let (Some(scene_id), Some(manager)) = (dialogue_scene, scene_manager) {
-        // Try to load and enter the scene
-        match manager.load_scene(&scene_id) {
-            Ok(scene) => {
-                let output = enter_scene(world, character, scene)?;
-                let description = format!(
-                    "{} turns to you.\n\n{}",
-                    npc_name,
-                    format_scene_for_zulip(&output)
-                );
-                return Ok(ToolResult::success(description, output.summary));
-            }
-            Err(e) => {
-                // Scene failed to load - fall back to generated greeting
-                tracing::warn!("Failed to load scene {}: {}", scene_id, e);
-            }
-        }
-    }
-
-    // Fallback: generate simple dialogue from NPC description
-    let greeting = generate_npc_greeting(&npc_description);
-
+    // Return NPC info - the LLM will generate the actual dialogue
     Ok(ToolResult::success(
         format!(
-            "{} turns to you.\n\n\"{}\"\n\n*{}*",
-            npc_name, greeting, npc_description
+            "NPC_TALK:{}\nDESCRIPTION:{}",
+            npc.name, npc.description
         ),
-        format!("Spoke with {}", npc_name),
+        format!("Talking to {}", npc.name),
     ))
-}
-
-/// Generate a simple greeting based on NPC description
-fn generate_npc_greeting(description: &SmolStr) -> String {
-    // Extract personality hints from description for simple dialogue
-    let desc_lower = description.to_lowercase();
-
-    if desc_lower.contains("warm") || desc_lower.contains("friendly") {
-        "Welcome, traveler! What can I do for you today?".to_string()
-    } else if desc_lower.contains("shrewd") || desc_lower.contains("merchant") {
-        "Ah, a customer! Take a look at my wares.".to_string()
-    } else if desc_lower.contains("mysterious") || desc_lower.contains("knowing") {
-        "You seek answers... but are you ready to hear them?".to_string()
-    } else if desc_lower.contains("guard") || desc_lower.contains("soldier") {
-        "State your business, citizen.".to_string()
-    } else {
-        "Greetings, traveler.".to_string()
-    }
 }
 
 /// Execute the 'say' tool - character speaks aloud

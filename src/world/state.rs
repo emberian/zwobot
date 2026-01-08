@@ -49,7 +49,6 @@ impl WorldState {
             inventory: Vec::new(),
             stats: CharacterStats::default(),
             equipment: Equipment::default(),
-            active_scene: None,
         };
 
         self.characters.insert(name.clone(), char_state);
@@ -201,8 +200,6 @@ pub struct CharacterState {
     pub stats: CharacterStats,
     /// Equipped items
     pub equipment: Equipment,
-    /// Active scene state (if in a scene)
-    pub active_scene: Option<ActiveScene>,
 }
 
 /// Character statistics
@@ -237,15 +234,6 @@ pub struct Equipment {
     pub weapon: Option<SmolStr>,
     pub armor: Option<SmolStr>,
     pub accessory: Option<SmolStr>,
-}
-
-/// Active scene state
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveScene {
-    /// Scene file name
-    pub scene_id: SmolStr,
-    /// Current passage in the scene
-    pub current_passage: SmolStr,
 }
 
 /// A world object (item)

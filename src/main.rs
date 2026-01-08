@@ -3,35 +3,42 @@ mod config;
 mod error;
 mod llm;
 mod prompts;
-mod scenes;
 mod tools;
 mod turn;
 mod world;
 mod zulip;
 mod zulip_logger;
 
-use bot_control::ControlContext;
+use bot_control::{ControlContext, ModelState};
 use config::{AppConfig, TopicConfig, ZulipConfig};
 use llm::LlmEngine;
-use prompts::{build_turn_prompt, get_active_scene_output};
-use scenes::SceneManager;
+use prompts::{build_interpreter_prompt, extract_action, extract_narrative};
 use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tools::{execute_tool, parse_tool_call};
+use tools::{execute_tool, get_available_tools};
 use tracing::{debug, error, info, trace, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use turn::TurnCoordinator;
 use world::WorldState;
 use zulip::{Message, ZulipClient};
 use zulip_logger::ZulipLayer;
 
-type ModelCache = Arc<RwLock<HashMap<String, Arc<LlmEngine>>>>;
+/// Result of attempting to get/load a model
+enum ModelLoadResult {
+    /// Model is ready
+    Ready(Arc<LlmEngine>),
+    /// Model download was just started in background
+    StartedLoading,
+    /// Model was already loading from previous request
+    AlreadyLoading,
+    /// Model loading failed
+    Failed(String),
+}
+
+type ModelCache = Arc<RwLock<HashMap<String, ModelState>>>;
 type WorldCache = Arc<RwLock<HashMap<String, WorldState>>>;
-type CoordinatorCache = Arc<RwLock<HashMap<String, TurnCoordinator>>>;
-type SceneManagerCache = Arc<RwLock<SceneManager>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -48,12 +55,12 @@ async fn main() -> anyhow::Result<()> {
 
     let fmt_layer = tracing_subscriber::fmt::layer();
 
-    // Create Zulip logging layer (logs WARN and above to bot-logs topic)
+    // Create Zulip logging layer (logs TRACE and above to bot-logs topic)
     let (zulip_layer, _log_task) = ZulipLayer::new(
         zulip.clone(),
         app_config.channel.clone(),
         "bot-logs".to_string(),
-        Level::WARN,
+        Level::TRACE,
     );
 
     tracing_subscriber::registry()
@@ -72,15 +79,8 @@ async fn main() -> anyhow::Result<()> {
     // World state cache: topic -> WorldState
     let worlds: WorldCache = Arc::new(RwLock::new(HashMap::new()));
 
-    // Turn coordinator cache: topic -> TurnCoordinator
-    let coordinators: CoordinatorCache = Arc::new(RwLock::new(HashMap::new()));
-
-    // Scene manager (shared across topics)
-    let scene_manager: SceneManagerCache =
-        Arc::new(RwLock::new(SceneManager::new("data/scenes")));
-
     // Register for real-time message events
-    let (queue_id, mut last_event_id) = zulip.register_queue(&["message"]).await?;
+    let (mut queue_id, mut last_event_id) = zulip.register_queue(&["message"]).await?;
     info!("Listening for messages...");
 
     // Event loop
@@ -97,12 +97,10 @@ async fn main() -> anyhow::Result<()> {
                             let app_config = app_config.clone();
                             let models = models.clone();
                             let worlds = worlds.clone();
-                            let coordinators = coordinators.clone();
-                            let scene_manager = scene_manager.clone();
 
                             tokio::spawn(async move {
                                 if let Err(e) =
-                                    handle_message(zulip, app_config, models, worlds, coordinators, scene_manager, message).await
+                                    handle_message(zulip, app_config, models, worlds, message).await
                                 {
                                     error!("Error handling message: {}", e);
                                 }
@@ -120,9 +118,8 @@ async fn main() -> anyhow::Result<()> {
                 match zulip.register_queue(&["message"]).await {
                     Ok((new_queue_id, new_last_event_id)) => {
                         info!("Re-registered event queue");
+                        queue_id = new_queue_id;
                         last_event_id = new_last_event_id;
-                        // Note: We can't reassign queue_id here because it's not mutable
-                        // In a real implementation, we'd need to refactor this
                     }
                     Err(e) => {
                         error!("Failed to re-register queue: {}", e);
@@ -141,8 +138,6 @@ async fn handle_message(
     app_config: AppConfig,
     models: ModelCache,
     worlds: WorldCache,
-    coordinators: CoordinatorCache,
-    scene_manager: SceneManagerCache,
     message: Message,
 ) -> anyhow::Result<()> {
     // Get stream name from display_recipient
@@ -169,13 +164,15 @@ async fn handle_message(
 
     let topic = message.subject.clone();
     let message_id = message.id;
+    let player_name = message.sender_full_name.clone();
+    let player_message = message.content.clone();
 
     info!(
         "Received message in {}/{} from {}: {}",
         stream_name,
         topic,
-        message.sender_full_name,
-        message.content.chars().take(50).collect::<String>()
+        player_name,
+        player_message.chars().take(50).collect::<String>()
     );
 
     // Add progress indicator (working emoji)
@@ -190,7 +187,7 @@ async fn handle_message(
                 zulip: zulip.clone(),
                 models: models.clone(),
                 worlds: worlds.clone(),
-                coordinators: coordinators.clone(),
+                coordinators: Arc::new(RwLock::new(HashMap::new())), // Placeholder
                 app_config: app_config.clone(),
             };
             let result = bot_control::handle_control_message(&ctx, &message, "bot-control").await;
@@ -213,169 +210,117 @@ async fn handle_message(
     // Get topic config
     let topic_config = app_config.get_topic_config(&topic);
     debug!(
-        "Topic config: model={} quant={} chars={}",
+        "Topic config: model={} quant={}",
         topic_config.model_id,
-        topic_config.quantization,
-        topic_config.characters.len()
+        topic_config.quantization
     );
 
-    // Get or load model for this topic
-    let model = get_or_load_model(&models, &topic, topic_config).await?;
+    // Get or load model for this topic (non-blocking)
+    let model = match get_or_load_model(
+        models.clone(),
+        zulip.clone(),
+        &app_config.channel,
+        &topic,
+        topic_config.clone(),
+    )
+    .await
+    {
+        ModelLoadResult::Ready(engine) => engine,
+        ModelLoadResult::StartedLoading => {
+            // Model download started in background, we've already notified the user
+            let _ = zulip.remove_reaction(message_id, "working").await;
+            let _ = zulip.add_reaction(message_id, "hourglass").await;
+            return Ok(());
+        }
+        ModelLoadResult::AlreadyLoading => {
+            // Model is still loading from a previous request
+            let _ = zulip.remove_reaction(message_id, "working").await;
+            let _ = zulip.add_reaction(message_id, "hourglass").await;
+            return Ok(());
+        }
+        ModelLoadResult::Failed(err) => {
+            let _ = zulip.remove_reaction(message_id, "working").await;
+            let _ = zulip.add_reaction(message_id, "x").await;
+            zulip
+                .send_message(&app_config.channel, &topic, &format!("Model loading failed: {}", err))
+                .await?;
+            return Ok(());
+        }
+    };
 
     // Get or load world state for this topic
     let mut world = get_or_load_world(&worlds, &topic, &app_config.world_data_path).await?;
 
-    // Get or create turn coordinator for this topic
-    let mut coordinator = get_or_create_coordinator(&coordinators, &topic).await;
+    // Ensure player exists in world (use Zulip username as character name)
+    let player_smol: SmolStr = player_name.clone().into();
+    ensure_player_in_world(&mut world, &player_smol);
 
-    // Get conversation history
-    let history = zulip
-        .get_topic_messages(&app_config.channel, &topic)
-        .await?;
+    info!("Processing player command from {} in topic {}", player_name, topic);
 
-    // Get characters for this topic
-    let characters = topic_config.get_characters();
+    // === NEW FLOW: Human is player, LLM interprets and narrates ===
 
-    info!(
-        "Generating responses for {} character(s) in topic: {}",
-        characters.len(),
-        topic
-    );
-    debug!("Characters: {:?}", characters.iter().map(|c| &c.name).collect::<Vec<_>>());
+    // 1. Build interpreter prompt
+    debug!("Building interpreter prompt");
+    let prompt = build_interpreter_prompt(&world, &player_name, &player_message);
+    trace!("Prompt length: {} chars", prompt.len());
 
-    // Generate response for each character
-    for character in characters {
-        let character_name: SmolStr = character.name.clone().into();
-        debug!("Processing turn for character: {}", character_name);
+    // 2. LLM interprets player intent and narrates
+    debug!("Calling LLM for interpretation");
+    let llm_output = model.generate(&prompt).await?;
+    info!("LLM output (first 200 chars): {}", llm_output.chars().take(200).collect::<String>());
 
-        // Ensure character exists in world
-        ensure_character_in_world(&mut world, &character_name);
-        trace!("Character ensured in world at location: {:?}", world.get_character(&character_name).map(|c| &c.location));
+    // 3. Extract action and narrative from LLM output
+    let action_str = extract_action(&llm_output);
+    let narrative = extract_narrative(&llm_output);
 
-        // Get active scene context if character is in a scene
-        let scene_context = {
-            let mut manager = scene_manager.write().await;
-            get_active_scene_output(&world, &character.name, &mut manager)
-        };
+    // 4. Parse and execute the action
+    let response = if let Some(action) = action_str {
+        debug!("Extracted action: {}", action);
 
-        if scene_context.is_some() {
-            debug!("Character {} is in active scene", character.name);
+        // Parse into tool call format
+        let parts: Vec<&str> = action.split_whitespace().collect();
+        if parts.is_empty() {
+            format!("{}\n\n*[No action understood]*", narrative)
         } else {
-            trace!("Character {} has no active scene", character.name);
-        }
+            let tool_name = parts[0].to_lowercase();
+            let args: Vec<SmolStr> = parts[1..].iter().map(|s| (*s).into()).collect();
 
-        // Build prompt with world state, tools, recent actions, and scene context
-        debug!("Building prompt for {}", character.name);
-        let prompt = build_turn_prompt(
-            &world,
-            &character,
-            &history,
-            zulip.bot_id(),
-            Some(&coordinator),
-            scene_context.as_ref(),
-        );
-        trace!("Prompt length: {} chars", prompt.len());
+            let tool_call = tools::definitions::ToolCall {
+                thinking: String::new(),
+                tool_name: tool_name.into(),
+                args,
+            };
 
-        info!("Generating response for character: {}", character.name);
+            // Execute the tool
+            match execute_tool(&mut world, &player_smol, &tool_call) {
+                Ok(result) => {
+                    debug!("Tool execution successful: {}", result.summary);
 
-        // Generate response from LLM
-        debug!("Calling LLM for generation");
-        let llm_output = model.generate(&prompt).await?;
-
-        info!("LLM output (first 200 chars): {}", llm_output.chars().take(200).collect::<String>());
-        debug!("Full LLM output length: {} chars", llm_output.len());
-
-        // Parse tool call from output
-        debug!("Parsing tool call from LLM output");
-        let tool_call = match parse_tool_call(&llm_output) {
-            Ok(call) => {
-                debug!("Parsed tool call: {} with {} args", call.tool_name, call.args.len());
-                call
-            }
-            Err(e) => {
-                error!("Failed to parse tool call: {}. Output: {}", e, llm_output);
-                // Send error message
-                zulip
-                    .send_message(
-                        &app_config.channel,
-                        &topic,
-                        &format!("**{}:** *[Error: No valid tool call found]*", character.name),
-                    )
-                    .await?;
-                continue;
-            }
-        };
-
-        info!("Tool call: {} {:?}", tool_call.tool_name, tool_call.args);
-
-        // Execute tool (with scene manager for scene-aware tools)
-        debug!("Executing tool: {}", tool_call.tool_name);
-        let result = {
-            let mut manager = scene_manager.write().await;
-            match execute_tool(&mut world, &character_name, &tool_call, Some(&mut manager)) {
-                Ok(res) => {
-                    debug!("Tool execution successful: {}", res.summary);
-                    res
+                    // Build response with narrative + affordances
+                    let affordances = format_affordances_for_player(&world, &player_smol);
+                    format!("{}\n\n---\n*{}*", narrative, affordances)
                 }
                 Err(e) => {
                     error!("Tool execution error: {}", e);
-                    zulip
-                        .send_message(
-                            &app_config.channel,
-                            &topic,
-                            &format!("**{}:** *[Error: {}]*", character.name, e),
-                        )
-                        .await?;
-                    continue;
+                    format!("{}\n\n*[Error: {}]*", narrative, e)
                 }
             }
-        };
-
-        // Record action in coordinator for other characters to see
-        debug!("Recording action in turn coordinator");
-        coordinator.record_action(
-            character_name.clone(),
-            format!("{} {}", tool_call.tool_name, tool_call.args_joined()).into(),
-            result.summary.clone().into(),
-        );
-
-        // Format response: thinking + tool result
-        debug!("Formatting response for Zulip");
-        let mut formatted_response = String::new();
-
-        if topic_config.characters.len() > 1 {
-            formatted_response.push_str(&format!("**{}:**\n\n", character.name));
         }
+    } else {
+        // No action found - just return the narrative
+        debug!("No action tag found in LLM output");
+        narrative
+    };
 
-        // Include thinking if it's meaningful
-        if !tool_call.thinking.is_empty() && tool_call.thinking.len() > 10 {
-            formatted_response.push_str(&format!("*{}*\n\n", tool_call.thinking));
-            trace!("Including thinking: {}", tool_call.thinking);
-        }
+    // 5. Send response to Zulip
+    debug!("Sending response to Zulip");
+    zulip
+        .send_message(&app_config.channel, &topic, &response)
+        .await?;
 
-        formatted_response.push_str(&result.description);
-        trace!("Final response length: {} chars", formatted_response.len());
-
-        // Send response
-        debug!("Sending response to Zulip");
-        zulip
-            .send_message(&app_config.channel, &topic, &formatted_response)
-            .await?;
-
-        info!(
-            "Response sent from {} to {}/{}: {}",
-            character.name, app_config.channel, topic, result.summary
-        );
-    }
-
-    // Advance turn after all characters have acted
-    debug!("Advancing turn counter");
-    coordinator.advance_turn();
-
-    // Save world state and coordinator
-    debug!("Saving world state and coordinator");
-    save_world(&worlds, &topic, world, &app_config.world_data_path).await?;
-    save_coordinator(&coordinators, &topic, coordinator).await;
+    // 6. Save world state
+    debug!("Saving world state");
+    save_world(&worlds, &topic, world).await?;
 
     // Remove progress indicator and add completion emoji
     debug!("Removing progress indicator from message {}", message_id);
@@ -386,50 +331,133 @@ async fn handle_message(
     Ok(())
 }
 
+/// Format available actions as a player-friendly hint
+fn format_affordances_for_player(world: &WorldState, player: &SmolStr) -> String {
+    let char_state = match world.get_character(player) {
+        Some(cs) => cs,
+        None => return "You can: look around".to_string(),
+    };
+
+    let room = match world.spatial.rooms.get(&char_state.location) {
+        Some(r) => r,
+        None => return "You can: look around".to_string(),
+    };
+
+    let mut hints = Vec::new();
+
+    // Movement
+    if !room.exits.is_empty() {
+        let exits: Vec<String> = room.exits.keys().map(|s| s.to_string()).collect();
+        hints.push(format!("go {}", exits.join("/")));
+    }
+
+    // Items
+    if !room.objects.is_empty() {
+        hints.push("examine/take items".to_string());
+    }
+
+    // NPCs
+    if !room.npcs.is_empty() {
+        let npc_names: Vec<String> = room
+            .npcs
+            .iter()
+            .filter_map(|id| world.npc_defs.get(id))
+            .map(|npc| npc.name.to_string())
+            .collect();
+        hints.push(format!("talk to {}", npc_names.join(", ")));
+    }
+
+    // Inventory
+    if !char_state.inventory.is_empty() {
+        hints.push("check inventory".to_string());
+    }
+
+    hints.push("look around".to_string());
+
+    format!("You can: {}", hints.join(" | "))
+}
+
 async fn get_or_load_model(
-    models: &ModelCache,
+    models: ModelCache,
+    zulip: Arc<ZulipClient>,
+    channel: &str,
     topic: &str,
-    config: &TopicConfig,
-) -> anyhow::Result<Arc<LlmEngine>> {
-    // Check if model is already loaded
+    config: TopicConfig,
+) -> ModelLoadResult {
+    // Check current state
     {
         let models_read = models.read().await;
-        if let Some(engine) = models_read.get(topic) {
-            debug!("Using cached model for topic '{}'", topic);
-            return Ok(engine.clone());
+        if let Some(state) = models_read.get(topic) {
+            match state {
+                ModelState::Ready(engine) => {
+                    debug!("Using cached model for topic '{}'", topic);
+                    return ModelLoadResult::Ready(engine.clone());
+                }
+                ModelState::Loading => {
+                    debug!("Model for topic '{}' is still loading", topic);
+                    return ModelLoadResult::AlreadyLoading;
+                }
+                ModelState::Failed(err) => {
+                    debug!("Model for topic '{}' previously failed: {}", topic, err);
+                    return ModelLoadResult::Failed(err.clone());
+                }
+            }
         }
     }
 
-    // Model not loaded, load it
-    info!(
-        "Loading model for topic '{}': {} {}",
-        topic, config.model_id, config.quantization
-    );
-    debug!(
-        "Model config: max_tokens={} temp={}",
-        config.max_tokens, config.temperature
-    );
-
-    let engine = LlmEngine::new(
-        &config.model_id,
-        &config.quantization,
-        config.max_tokens,
-        config.temperature,
-    )
-    .await?;
-
-    let engine = Arc::new(engine);
-
-    // Store in cache
+    // Mark as loading
     {
         let mut models_write = models.write().await;
-        models_write.insert(topic.to_string(), engine.clone());
-        debug!("Model cached for topic '{}'", topic);
+        models_write.insert(topic.to_string(), ModelState::Loading);
     }
 
-    info!("Model loaded for topic '{}'", topic);
+    // Notify user that we're downloading
+    info!(
+        "Starting model download for topic '{}': {} {}",
+        topic, config.model_id, config.quantization
+    );
+    let _ = zulip
+        .send_message(
+            channel,
+            topic,
+            &format!(
+                "Downloading model **{}** ({})... I'll respond once it's ready.",
+                config.model_id, config.quantization
+            ),
+        )
+        .await;
 
-    Ok(engine)
+    // Spawn the download in background
+    let models_clone = models.clone();
+    let topic_owned = topic.to_string();
+    tokio::spawn(async move {
+        debug!(
+            "Background model loading started for topic '{}'",
+            topic_owned
+        );
+
+        let result = LlmEngine::new(
+            &config.model_id,
+            &config.quantization,
+            config.max_tokens,
+            config.temperature,
+        )
+        .await;
+
+        let mut models_write = models_clone.write().await;
+        match result {
+            Ok(engine) => {
+                info!("Model loaded successfully for topic '{}'", topic_owned);
+                models_write.insert(topic_owned, ModelState::Ready(Arc::new(engine)));
+            }
+            Err(e) => {
+                error!("Model loading failed for topic '{}': {}", topic_owned, e);
+                models_write.insert(topic_owned, ModelState::Failed(e.to_string()));
+            }
+        }
+    });
+
+    ModelLoadResult::StartedLoading
 }
 
 async fn get_or_load_world(
@@ -473,7 +501,6 @@ async fn save_world(
     worlds: &WorldCache,
     topic: &str,
     world: WorldState,
-    _template_path: &str,
 ) -> anyhow::Result<()> {
     // Save to disk
     let save_path = WorldState::save_path_for_topic(topic);
@@ -489,51 +516,18 @@ async fn save_world(
     Ok(())
 }
 
-async fn get_or_create_coordinator(
-    coordinators: &CoordinatorCache,
-    topic: &str,
-) -> TurnCoordinator {
-    // Check if coordinator exists for this topic
-    {
-        let coordinators_read = coordinators.read().await;
-        if let Some(coordinator) = coordinators_read.get(topic) {
-            return coordinator.clone();
-        }
-    }
-
-    // Create new coordinator
-    let coordinator = TurnCoordinator::new();
-
-    // Store in cache
-    {
-        let mut coordinators_write = coordinators.write().await;
-        coordinators_write.insert(topic.to_string(), coordinator.clone());
-    }
-
-    coordinator
-}
-
-async fn save_coordinator(
-    coordinators: &CoordinatorCache,
-    topic: &str,
-    coordinator: TurnCoordinator,
-) {
-    let mut coordinators_write = coordinators.write().await;
-    coordinators_write.insert(topic.to_string(), coordinator);
-}
-
-fn ensure_character_in_world(world: &mut WorldState, character_name: &SmolStr) {
-    // Check if character already exists
-    if world.get_character(character_name).is_some() {
-        trace!("Character {} already exists in world", character_name);
+fn ensure_player_in_world(world: &mut WorldState, player_name: &SmolStr) {
+    // Check if player already exists
+    if world.get_character(player_name).is_some() {
+        trace!("Player {} already exists in world", player_name);
         return;
     }
 
-    // Add character to starting location (tavern)
+    // Add player to starting location (tavern)
     let starting_location: SmolStr = "tavern".into();
 
-    info!("Adding new character {} to world at {}", character_name, starting_location);
-    debug!("Character created with default stats");
+    info!("Adding new player {} to world at {}", player_name, starting_location);
+    debug!("Player created with default stats");
 
-    world.add_character(character_name.clone(), starting_location);
+    world.add_character(player_name.clone(), starting_location);
 }
