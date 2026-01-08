@@ -6,8 +6,14 @@ use std::path::Path;
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub channel: String,
+    #[serde(default = "default_world_data_path")]
+    pub world_data_path: String,
     pub topics: HashMap<String, TopicConfig>,
     pub default_topic: TopicConfig,
+}
+
+fn default_world_data_path() -> String {
+    "data/world_state.ron".to_string()
 }
 
 #[derive(Debug, Deserialize, Clone)]
