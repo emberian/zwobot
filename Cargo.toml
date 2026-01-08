@@ -32,6 +32,10 @@ anyhow = "1"
 # Random
 rand = "0.8"
 
+# Regex for tool parsing
+regex = "1"
+lazy_static = "1.4"
+
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

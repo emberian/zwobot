@@ -1,6 +1,7 @@
 mod config;
 mod error;
 mod llm;
+mod tools;
 mod world;
 mod zulip;
 

@@ -2378,8 +2378,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "hf-hub",
+ "lazy_static",
  "llama-cpp-2",
  "rand 0.8.5",
+ "regex",
  "reqwest",
  "ron",
  "serde",
