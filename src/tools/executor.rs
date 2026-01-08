@@ -6,6 +6,7 @@ use super::scenes::tool_choose;
 use crate::scenes::SceneManager;
 use crate::world::WorldState;
 use smol_str::SmolStr;
+use tracing::{debug, trace};
 
 /// Execute a tool call against the world state
 pub fn execute_tool(
@@ -14,6 +15,9 @@ pub fn execute_tool(
     call: &ToolCall,
     scene_manager: Option<&mut SceneManager>,
 ) -> anyhow::Result<ToolResult> {
+    debug!("Routing tool '{}' for character {}", call.tool_name, character);
+    trace!("Tool args: {:?}", call.args);
+
     match call.tool_name.as_str() {
         // Navigation tools (read-only, take immutable ref)
         "look" | "l" => tool_look(world, character),
@@ -44,10 +48,13 @@ pub fn execute_tool(
         }
 
         // Unknown tool
-        _ => Ok(ToolResult::failure(format!(
-            "Unknown tool: '{}'. Try: look, examine, go, inventory, take, drop, equip, talk, say, use, attack, choose",
-            call.tool_name
-        ))),
+        _ => {
+            debug!("Unknown tool requested: {}", call.tool_name);
+            Ok(ToolResult::failure(format!(
+                "Unknown tool: '{}'. Try: look, examine, go, inventory, take, drop, equip, talk, say, use, attack, choose",
+                call.tool_name
+            )))
+        }
     }
 }
 
@@ -55,24 +62,33 @@ pub fn execute_tool(
 pub fn get_available_tools(world: &WorldState, character: &SmolStr) -> String {
     let char_state = match world.get_character(character) {
         Some(cs) => cs,
-        None => return String::new(),
+        None => {
+            trace!("Character {} not found in world", character);
+            return String::new();
+        }
     };
 
     let room = match world.spatial.rooms.get(&char_state.location) {
         Some(r) => r,
-        None => return String::new(),
+        None => {
+            trace!("Room {} not found", char_state.location);
+            return String::new();
+        }
     };
 
     let mut tools = String::new();
 
     // Check if in active scene - if so, show scene-specific tools
     if char_state.active_scene.is_some() {
+        debug!("Generating scene-specific tool list for {}", character);
         tools.push_str("**You are in a conversation.**\n\n");
         tools.push_str("- `<tool>choose N</tool>` - Select choice number N\n");
         tools.push_str("- `<tool>say MESSAGE</tool>` - Say something aloud\n");
         tools.push_str("\nReview the choices above and use `choose N` to respond.");
         return tools;
     }
+
+    trace!("Generating standard tool list for {} in {}", character, char_state.location);
 
     tools.push_str("**Available Tools:**\n\n");
 

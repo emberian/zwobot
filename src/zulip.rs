@@ -99,10 +99,15 @@ impl ZulipClient {
         channel: &str,
         last_message_id: Option<i64>,
     ) -> Result<Vec<Message>> {
-        let mut params = vec![
-            ("anchor", "newest".to_string()),
-            ("num_before", "100".to_string()),
-            ("num_after", "0".to_string()),
+        let (anchor, num_before, num_after) = match last_message_id {
+            Some(id) => (id.to_string(), "0", "100"),
+            None => ("newest".to_string(), "100", "0"),
+        };
+
+        let params = vec![
+            ("anchor", anchor),
+            ("num_before", num_before.to_string()),
+            ("num_after", num_after.to_string()),
             (
                 "narrow",
                 serde_json::to_string(&vec![
@@ -111,12 +116,6 @@ impl ZulipClient {
                 .unwrap(),
             ),
         ];
-
-        if let Some(last_id) = last_message_id {
-            params.push(("anchor", last_id.to_string()));
-            params.push(("num_before", "0".to_string()));
-            params.push(("num_after", "100".to_string()));
-        }
 
         let url = format!("{}/api/v1/messages", self.config.site);
         let response = self

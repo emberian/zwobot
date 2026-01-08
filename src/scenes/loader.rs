@@ -7,7 +7,7 @@ use spween::{parse, Runtime, Scene};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use tracing::{error, info};
+use tracing::{debug, error, info, trace};
 
 /// Manages loading and caching of scene files.
 #[derive(Default)]
@@ -32,15 +32,18 @@ impl SceneManager {
 
         // Return cached if available
         if self.cache.contains_key(&scene_id) {
+            trace!("Using cached scene: {}", scene_id);
             return Ok(self.cache.get(&scene_id).unwrap());
         }
 
         // Load from file
         let path = format!("{}/{}.scene", self.scenes_dir, scene_id);
+        debug!("Loading scene from file: {}", path);
         let source = fs::read_to_string(&path)?;
         let scene = parse(&source, &path)?;
 
         info!("Loaded scene: {} ({})", scene.meta.title, scene_id);
+        debug!("Scene has {} passages", scene.passages.len());
 
         self.cache.insert(scene_id.clone(), scene);
         Ok(self.cache.get(&scene_id).unwrap())
@@ -95,6 +98,8 @@ pub fn enter_scene(
     character: &SmolStr,
     scene: &Scene,
 ) -> anyhow::Result<SceneOutput> {
+    debug!("Entering scene '{}' for character {}", scene.meta.id, character);
+
     let context = SceneContext::new(world, character.clone());
     let runtime = Runtime::new(scene, context)?;
 
@@ -112,6 +117,9 @@ pub fn enter_scene(
     let scene_id = scene.meta.id.clone();
     let scene_title = scene.meta.title.clone();
 
+    debug!("Scene entered at passage: {} ({} choices)", current_passage_name, choices.len());
+    trace!("Prose length: {} chars", prose.len());
+
     // Extract context (releasing the borrow) before updating world
     let _context = runtime.into_handler();
 
@@ -122,7 +130,10 @@ pub fn enter_scene(
                 scene_id,
                 current_passage: current_passage_name,
             });
+            trace!("Stored active scene in character state");
         }
+    } else {
+        debug!("Scene ended immediately (no active scene stored)");
     }
 
     Ok(SceneOutput {
@@ -140,11 +151,17 @@ pub fn continue_scene(
     scene: &Scene,
     choice_index: usize,
 ) -> anyhow::Result<SceneOutput> {
+    debug!("Continuing scene '{}' for character {} (choice {})", scene.meta.id, character, choice_index);
+
     // Get current passage to restore position
     let current_passage = world
         .get_character(character)
         .and_then(|cs| cs.active_scene.as_ref())
         .map(|as_| as_.current_passage.clone());
+
+    if let Some(ref passage) = current_passage {
+        debug!("Restoring scene to passage: {}", passage);
+    }
 
     let context = SceneContext::new(world, character.clone());
     let mut runtime = Runtime::new(scene, context)?;
@@ -163,6 +180,8 @@ pub fn continue_scene(
         .map(|c| c.text.to_string())
         .unwrap_or_else(|| format!("choice {}", choice_index));
 
+    debug!("Selected choice: '{}'", choice_text);
+
     // Select the choice
     runtime.select_choice(choice_index)?;
 
@@ -175,11 +194,16 @@ pub fn continue_scene(
     let ended = runtime.is_ended();
     let new_passage_name = runtime.current_passage().map(|p| p.name.clone());
 
+    if let Some(ref passage) = new_passage_name {
+        debug!("Moved to passage: {} ({} choices)", passage, choices.len());
+    }
+
     // Extract context (releasing the borrow) before updating world
     let _context = runtime.into_handler();
 
     // Update or clear active scene (now safe since runtime is consumed)
     if ended {
+        debug!("Scene ended, clearing active scene");
         if let Some(char_state) = world.get_character_mut(character) {
             char_state.active_scene = None;
         }

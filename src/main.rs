@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tools::{execute_tool, parse_tool_call};
-use tracing::{error, info, Level};
+use tracing::{debug, error, info, trace, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use turn::TurnCoordinator;
@@ -178,6 +178,7 @@ async fn handle_message(
 
     // Handle bot-control topic
     if topic == "bot-control" {
+        debug!("Routing to bot-control handler");
         let ctx = ControlContext {
             zulip: zulip.clone(),
             models: models.clone(),
@@ -190,6 +191,12 @@ async fn handle_message(
 
     // Get topic config
     let topic_config = app_config.get_topic_config(&topic);
+    debug!(
+        "Topic config: model={} quant={} chars={}",
+        topic_config.model_id,
+        topic_config.quantization,
+        topic_config.characters.len()
+    );
 
     // Get or load model for this topic
     let model = get_or_load_model(&models, &topic, topic_config).await?;
@@ -213,13 +220,16 @@ async fn handle_message(
         characters.len(),
         topic
     );
+    debug!("Characters: {:?}", characters.iter().map(|c| &c.name).collect::<Vec<_>>());
 
     // Generate response for each character
     for character in characters {
         let character_name: SmolStr = character.name.clone().into();
+        debug!("Processing turn for character: {}", character_name);
 
         // Ensure character exists in world
         ensure_character_in_world(&mut world, &character_name);
+        trace!("Character ensured in world at location: {:?}", world.get_character(&character_name).map(|c| &c.location));
 
         // Get active scene context if character is in a scene
         let scene_context = {
@@ -227,7 +237,14 @@ async fn handle_message(
             get_active_scene_output(&world, &character.name, &mut manager)
         };
 
+        if scene_context.is_some() {
+            debug!("Character {} is in active scene", character.name);
+        } else {
+            trace!("Character {} has no active scene", character.name);
+        }
+
         // Build prompt with world state, tools, recent actions, and scene context
+        debug!("Building prompt for {}", character.name);
         let prompt = build_turn_prompt(
             &world,
             &character,
@@ -236,17 +253,24 @@ async fn handle_message(
             Some(&coordinator),
             scene_context.as_ref(),
         );
+        trace!("Prompt length: {} chars", prompt.len());
 
         info!("Generating response for character: {}", character.name);
 
         // Generate response from LLM
+        debug!("Calling LLM for generation");
         let llm_output = model.generate(&prompt).await?;
 
         info!("LLM output (first 200 chars): {}", llm_output.chars().take(200).collect::<String>());
+        debug!("Full LLM output length: {} chars", llm_output.len());
 
         // Parse tool call from output
+        debug!("Parsing tool call from LLM output");
         let tool_call = match parse_tool_call(&llm_output) {
-            Ok(call) => call,
+            Ok(call) => {
+                debug!("Parsed tool call: {} with {} args", call.tool_name, call.args.len());
+                call
+            }
             Err(e) => {
                 error!("Failed to parse tool call: {}. Output: {}", e, llm_output);
                 // Send error message
@@ -264,10 +288,14 @@ async fn handle_message(
         info!("Tool call: {} {:?}", tool_call.tool_name, tool_call.args);
 
         // Execute tool (with scene manager for scene-aware tools)
+        debug!("Executing tool: {}", tool_call.tool_name);
         let result = {
             let mut manager = scene_manager.write().await;
             match execute_tool(&mut world, &character_name, &tool_call, Some(&mut manager)) {
-                Ok(res) => res,
+                Ok(res) => {
+                    debug!("Tool execution successful: {}", res.summary);
+                    res
+                }
                 Err(e) => {
                     error!("Tool execution error: {}", e);
                     zulip
@@ -283,6 +311,7 @@ async fn handle_message(
         };
 
         // Record action in coordinator for other characters to see
+        debug!("Recording action in turn coordinator");
         coordinator.record_action(
             character_name.clone(),
             format!("{} {}", tool_call.tool_name, tool_call.args_joined()).into(),
@@ -290,6 +319,7 @@ async fn handle_message(
         );
 
         // Format response: thinking + tool result
+        debug!("Formatting response for Zulip");
         let mut formatted_response = String::new();
 
         if topic_config.characters.len() > 1 {
@@ -299,11 +329,14 @@ async fn handle_message(
         // Include thinking if it's meaningful
         if !tool_call.thinking.is_empty() && tool_call.thinking.len() > 10 {
             formatted_response.push_str(&format!("*{}*\n\n", tool_call.thinking));
+            trace!("Including thinking: {}", tool_call.thinking);
         }
 
         formatted_response.push_str(&result.description);
+        trace!("Final response length: {} chars", formatted_response.len());
 
         // Send response
+        debug!("Sending response to Zulip");
         zulip
             .send_message(&app_config.channel, &topic, &formatted_response)
             .await?;
@@ -315,12 +348,15 @@ async fn handle_message(
     }
 
     // Advance turn after all characters have acted
+    debug!("Advancing turn counter");
     coordinator.advance_turn();
 
     // Save world state and coordinator
+    debug!("Saving world state and coordinator");
     save_world(&worlds, &topic, world, &app_config.world_data_path).await?;
     save_coordinator(&coordinators, &topic, coordinator).await;
 
+    debug!("Message handling complete for topic: {}", topic);
     Ok(())
 }
 
@@ -333,6 +369,7 @@ async fn get_or_load_model(
     {
         let models_read = models.read().await;
         if let Some(engine) = models_read.get(topic) {
+            debug!("Using cached model for topic '{}'", topic);
             return Ok(engine.clone());
         }
     }
@@ -341,6 +378,10 @@ async fn get_or_load_model(
     info!(
         "Loading model for topic '{}': {} {}",
         topic, config.model_id, config.quantization
+    );
+    debug!(
+        "Model config: max_tokens={} temp={}",
+        config.max_tokens, config.temperature
     );
 
     let engine = LlmEngine::new(
@@ -357,6 +398,7 @@ async fn get_or_load_model(
     {
         let mut models_write = models.write().await;
         models_write.insert(topic.to_string(), engine.clone());
+        debug!("Model cached for topic '{}'", topic);
     }
 
     info!("Model loaded for topic '{}'", topic);
@@ -373,18 +415,27 @@ async fn get_or_load_world(
     {
         let worlds_read = worlds.read().await;
         if let Some(world) = worlds_read.get(topic) {
+            debug!("Using cached world for topic '{}'", topic);
+            trace!("Cached world has {} characters", world.characters.len());
             return Ok(world.clone());
         }
     }
 
     // World not loaded - try to load from save file, fall back to template
     let save_path = WorldState::save_path_for_topic(topic);
+    debug!("Loading world for topic '{}' from: {}", topic, save_path);
     let world = WorldState::load_or_create(&save_path, template_path)?;
+    debug!("World loaded with {} rooms, {} objects, {} NPCs",
+        world.spatial.rooms.len(),
+        world.object_defs.len(),
+        world.npc_defs.len()
+    );
 
     // Store in cache
     {
         let mut worlds_write = worlds.write().await;
         worlds_write.insert(topic.to_string(), world.clone());
+        debug!("World cached for topic '{}'", topic);
     }
 
     info!("World state loaded for topic '{}'", topic);
@@ -448,6 +499,7 @@ async fn save_coordinator(
 fn ensure_character_in_world(world: &mut WorldState, character_name: &SmolStr) {
     // Check if character already exists
     if world.get_character(character_name).is_some() {
+        trace!("Character {} already exists in world", character_name);
         return;
     }
 
@@ -455,6 +507,7 @@ fn ensure_character_in_world(world: &mut WorldState, character_name: &SmolStr) {
     let starting_location: SmolStr = "tavern".into();
 
     info!("Adding new character {} to world at {}", character_name, starting_location);
+    debug!("Character created with default stats");
 
     world.add_character(character_name.clone(), starting_location);
 }

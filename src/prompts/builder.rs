@@ -5,6 +5,7 @@ use crate::turn::TurnCoordinator;
 use crate::world::WorldState;
 use crate::zulip::Message;
 use smol_str::SmolStr;
+use tracing::trace;
 
 /// Build a prompt for a character's turn
 pub fn build_turn_prompt(
@@ -15,6 +16,8 @@ pub fn build_turn_prompt(
     coordinator: Option<&TurnCoordinator>,
     scene_context: Option<&SceneOutput>,
 ) -> String {
+    trace!("Building prompt for {} (in_scene={})", character.name, scene_context.is_some());
+
     let mut prompt = String::new();
 
     // 1. Character personality
@@ -182,6 +185,8 @@ pub fn build_turn_prompt(
         prompt.push_str("Example: \"I should explore the area. <tool>look</tool>\"\n\n");
     }
     prompt.push_str("Your turn:");
+
+    trace!("Prompt built: {} chars total", prompt.len());
 
     prompt
 }
