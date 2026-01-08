@@ -1,0 +1,97 @@
+---
+id: innkeeper_dialogue
+title: Grenda the Innkeeper
+weight: 10
+cooldown: 0
+---
+
+=== intro
+
+Grenda wipes her hands on her apron and leans against the bar, studying you with a warm but appraising look.
+
+"Well now, what can I get for you, traveler? A drink to warm your bones? A room for the night? Or perhaps..." she lowers her voice conspiratorially, "you're looking for something more interesting?"
+
+* [Ask for a drink]
+  -> drink
+
+* [Ask about local rumors]
+  -> rumors
+
+* [Inquire about the old ruins] { flag.knows_about_ruins }
+  -> ruins_info
+
+* [Just passing through]
+  -> farewell
+
+=== drink
+
+Grenda pours you a mug of her finest ale, sliding it across the counter with practiced ease.
+
+"There you go. The Rusty Flagon's special brew. Been making it the same way for thirty years." She pauses. "Though I suppose you're not just here for the ale, are you?"
+
+~ give_item "ale"
+
+* [What do you mean?]
+  -> rumors
+
+* [The ale is enough, thanks]
+  -> farewell
+
+=== rumors
+
+Grenda glances around the tavern, making sure no one is listening too closely.
+
+"There's been strange folk passing through lately. Cloaked figures heading north, toward the old forest path. And then there's the hermit who lives out there..." She shakes her head. "They say he knows things. Old things. About the ruins and what's buried there."
+
+~ set_flag "knows_about_ruins"
+
+* [Tell me more about these cloaked figures]
+  -> cloaked_figures
+
+* [What ruins?]
+  -> ruins_basic
+
+* [Thank you for the information]
+  -> farewell
+
+=== cloaked_figures
+
+"Couldn't tell you much about them. They don't talk, don't drink, just pass through. Heading north, always north." Grenda's expression darkens. "Whatever they're looking for in those ruins... I hope they don't find it."
+
+* [I should investigate]
+  -> farewell
+
+* [Ask about the hermit]
+  -> hermit_info
+
+=== ruins_basic
+
+"Old ruins, north through the forest. Been there since before anyone can remember. The hermit guards the path - won't let just anyone through. But if you can earn his trust..." She trails off meaningfully.
+
+~ set_flag "knows_about_ruins"
+
+* [How do I earn the hermit's trust?]
+  -> hermit_info
+
+* [Thanks for the tip]
+  -> farewell
+
+=== hermit_info
+
+"The old hermit? Strange fellow, but not unkind. He tests everyone who wants to pass. Some kind of riddle, they say, or maybe just a conversation. He can see into people's hearts." Grenda shrugs. "That's what the old stories say, anyway."
+
+* [I'll find him]
+  -> farewell
+
+=== ruins_info
+
+"Ah, so you've heard about the ruins, have you?" Grenda nods slowly. "Dangerous place, but they say there's treasures beyond imagining in the secret chamber. The key... the key is hidden somewhere in this very building." She winks. "Check the cellar, if you haven't already."
+
+* [Thank you, Grenda]
+  -> farewell
+
+=== farewell
+
+Grenda gives you a friendly nod. "Safe travels, friend. May the road rise to meet you."
+
+-> END

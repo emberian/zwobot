@@ -2,6 +2,7 @@ mod config;
 mod error;
 mod llm;
 mod prompts;
+mod scenes;
 mod tools;
 mod turn;
 mod world;
@@ -9,7 +10,8 @@ mod zulip;
 
 use config::{AppConfig, TopicConfig, ZulipConfig};
 use llm::LlmEngine;
-use prompts::build_turn_prompt;
+use prompts::{build_turn_prompt, get_active_scene_output};
+use scenes::SceneManager;
 use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -23,6 +25,7 @@ use zulip::{Message, ZulipClient};
 type ModelCache = Arc<RwLock<HashMap<String, Arc<LlmEngine>>>>;
 type WorldCache = Arc<RwLock<HashMap<String, WorldState>>>;
 type CoordinatorCache = Arc<RwLock<HashMap<String, TurnCoordinator>>>;
+type SceneManagerCache = Arc<RwLock<SceneManager>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -56,6 +59,10 @@ async fn main() -> anyhow::Result<()> {
     // Turn coordinator cache: topic -> TurnCoordinator
     let coordinators: CoordinatorCache = Arc::new(RwLock::new(HashMap::new()));
 
+    // Scene manager (shared across topics)
+    let scene_manager: SceneManagerCache =
+        Arc::new(RwLock::new(SceneManager::new("data/scenes")));
+
     // Register for real-time message events
     let (queue_id, mut last_event_id) = zulip.register_queue(&["message"]).await?;
     info!("Listening for messages...");
@@ -75,10 +82,11 @@ async fn main() -> anyhow::Result<()> {
                             let models = models.clone();
                             let worlds = worlds.clone();
                             let coordinators = coordinators.clone();
+                            let scene_manager = scene_manager.clone();
 
                             tokio::spawn(async move {
                                 if let Err(e) =
-                                    handle_message(zulip, app_config, models, worlds, coordinators, message).await
+                                    handle_message(zulip, app_config, models, worlds, coordinators, scene_manager, message).await
                                 {
                                     error!("Error handling message: {}", e);
                                 }
@@ -118,6 +126,7 @@ async fn handle_message(
     models: ModelCache,
     worlds: WorldCache,
     coordinators: CoordinatorCache,
+    scene_manager: SceneManagerCache,
     message: Message,
 ) -> anyhow::Result<()> {
     // Get stream name from display_recipient
@@ -184,8 +193,21 @@ async fn handle_message(
         // Ensure character exists in world
         ensure_character_in_world(&mut world, &character_name);
 
-        // Build prompt with world state, tools, and recent actions
-        let prompt = build_turn_prompt(&world, &character, &history, zulip.bot_id(), Some(&coordinator));
+        // Get active scene context if character is in a scene
+        let scene_context = {
+            let mut manager = scene_manager.write().await;
+            get_active_scene_output(&world, &character.name, &mut manager)
+        };
+
+        // Build prompt with world state, tools, recent actions, and scene context
+        let prompt = build_turn_prompt(
+            &world,
+            &character,
+            &history,
+            zulip.bot_id(),
+            Some(&coordinator),
+            scene_context.as_ref(),
+        );
 
         info!("Generating response for character: {}", character.name);
 
@@ -213,19 +235,22 @@ async fn handle_message(
 
         info!("Tool call: {} {:?}", tool_call.tool_name, tool_call.args);
 
-        // Execute tool
-        let result = match execute_tool(&mut world, &character_name, &tool_call) {
-            Ok(res) => res,
-            Err(e) => {
-                error!("Tool execution error: {}", e);
-                zulip
-                    .send_message(
-                        &app_config.channel,
-                        &topic,
-                        &format!("**{}:** *[Error: {}]*", character.name, e),
-                    )
-                    .await?;
-                continue;
+        // Execute tool (with scene manager for scene-aware tools)
+        let result = {
+            let mut manager = scene_manager.write().await;
+            match execute_tool(&mut world, &character_name, &tool_call, Some(&mut manager)) {
+                Ok(res) => res,
+                Err(e) => {
+                    error!("Tool execution error: {}", e);
+                    zulip
+                        .send_message(
+                            &app_config.channel,
+                            &topic,
+                            &format!("**{}:** *[Error: {}]*", character.name, e),
+                        )
+                        .await?;
+                    continue;
+                }
             }
         };
 

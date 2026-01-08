@@ -1,13 +1,15 @@
 use super::definitions::{ToolCall, ToolResult};
 use super::matching::matches_name;
+use crate::scenes::{enter_scene, format_scene_for_zulip, SceneManager};
 use crate::world::WorldState;
 use smol_str::SmolStr;
 
 /// Execute the 'talk' tool - talk to an NPC in the current room
 pub fn tool_talk(
-    world: &WorldState,
+    world: &mut WorldState,
     character: &SmolStr,
     call: &ToolCall,
+    scene_manager: Option<&mut SceneManager>,
 ) -> anyhow::Result<ToolResult> {
     let target = call.args_joined();
     if target.is_empty() {
@@ -25,12 +27,12 @@ pub fn tool_talk(
         .ok_or_else(|| anyhow::anyhow!("Room not found"))?;
 
     // Find matching NPC in room
-    let mut found_npc_id: Option<&SmolStr> = None;
+    let mut found_npc_id: Option<SmolStr> = None;
 
     for npc_id in &room.npcs {
         if let Some(npc) = world.npc_defs.get(npc_id) {
             if matches_name(&npc.name, &target) {
-                found_npc_id = Some(npc_id);
+                found_npc_id = Some(npc_id.clone());
                 break;
             }
         }
@@ -40,20 +42,42 @@ pub fn tool_talk(
 
     let npc = world
         .npc_defs
-        .get(npc_id)
+        .get(&npc_id)
         .ok_or_else(|| anyhow::anyhow!("NPC not found"))?;
 
-    // TODO Phase 5: Check for dialogue_scene and load spween scene
-    // For now, generate simple dialogue from NPC description
+    let npc_name = npc.name.clone();
+    let npc_description = npc.description.clone();
+    let dialogue_scene = npc.dialogue_scene.clone();
 
-    let greeting = generate_npc_greeting(&npc.description);
+    // Check for dialogue scene
+    if let (Some(scene_id), Some(manager)) = (dialogue_scene, scene_manager) {
+        // Try to load and enter the scene
+        match manager.load_scene(&scene_id) {
+            Ok(scene) => {
+                let output = enter_scene(world, character, scene)?;
+                let description = format!(
+                    "{} turns to you.\n\n{}",
+                    npc_name,
+                    format_scene_for_zulip(&output)
+                );
+                return Ok(ToolResult::success(description, output.summary));
+            }
+            Err(e) => {
+                // Scene failed to load - fall back to generated greeting
+                tracing::warn!("Failed to load scene {}: {}", scene_id, e);
+            }
+        }
+    }
+
+    // Fallback: generate simple dialogue from NPC description
+    let greeting = generate_npc_greeting(&npc_description);
 
     Ok(ToolResult::success(
         format!(
             "{} turns to you.\n\n\"{}\"\n\n*{}*",
-            npc.name, greeting, npc.description
+            npc_name, greeting, npc_description
         ),
-        format!("Spoke with {}", npc.name),
+        format!("Spoke with {}", npc_name),
     ))
 }
 

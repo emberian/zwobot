@@ -2,6 +2,8 @@ use super::definitions::{ToolCall, ToolResult};
 use super::interaction::{tool_attack, tool_say, tool_talk, tool_use};
 use super::inventory::{tool_drop, tool_equip, tool_inventory, tool_take};
 use super::navigation::{tool_examine, tool_go, tool_look};
+use super::scenes::tool_choose;
+use crate::scenes::SceneManager;
 use crate::world::WorldState;
 use smol_str::SmolStr;
 
@@ -10,6 +12,7 @@ pub fn execute_tool(
     world: &mut WorldState,
     character: &SmolStr,
     call: &ToolCall,
+    scene_manager: Option<&mut SceneManager>,
 ) -> anyhow::Result<ToolResult> {
     match call.tool_name.as_str() {
         // Navigation tools (read-only, take immutable ref)
@@ -26,14 +29,23 @@ pub fn execute_tool(
         "equip" | "wear" | "wield" => tool_equip(world, character, call),
 
         // Interaction tools
-        "talk" | "speak" => tool_talk(world, character, call),
+        "talk" | "speak" => tool_talk(world, character, call, scene_manager),
         "say" => tool_say(call),
         "use" | "consume" | "drink" | "eat" => tool_use(world, character, call),
         "attack" | "hit" | "fight" => tool_attack(world, character, call),
 
+        // Scene tools
+        "choose" | "select" => {
+            if let Some(manager) = scene_manager {
+                tool_choose(world, character, call, manager)
+            } else {
+                Ok(ToolResult::failure("Scene system not available.".to_string()))
+            }
+        }
+
         // Unknown tool
         _ => Ok(ToolResult::failure(format!(
-            "Unknown tool: '{}'. Try: look, examine, go, inventory, take, drop, equip, talk, say, use, attack",
+            "Unknown tool: '{}'. Try: look, examine, go, inventory, take, drop, equip, talk, say, use, attack, choose",
             call.tool_name
         ))),
     }
@@ -52,6 +64,15 @@ pub fn get_available_tools(world: &WorldState, character: &SmolStr) -> String {
     };
 
     let mut tools = String::new();
+
+    // Check if in active scene - if so, show scene-specific tools
+    if char_state.active_scene.is_some() {
+        tools.push_str("**You are in a conversation.**\n\n");
+        tools.push_str("- `<tool>choose N</tool>` - Select choice number N\n");
+        tools.push_str("- `<tool>say MESSAGE</tool>` - Say something aloud\n");
+        tools.push_str("\nReview the choices above and use `choose N` to respond.");
+        return tools;
+    }
 
     tools.push_str("**Available Tools:**\n\n");
 

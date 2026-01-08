@@ -1,4 +1,5 @@
 use crate::config::Character;
+use crate::scenes::{format_scene_for_prompt, SceneManager, SceneOutput};
 use crate::tools::get_available_tools;
 use crate::turn::TurnCoordinator;
 use crate::world::WorldState;
@@ -12,6 +13,7 @@ pub fn build_turn_prompt(
     history: &[Message],
     bot_id: i64,
     coordinator: Option<&TurnCoordinator>,
+    scene_context: Option<&SceneOutput>,
 ) -> String {
     let mut prompt = String::new();
 
@@ -63,60 +65,66 @@ pub fn build_turn_prompt(
 
         prompt.push_str("\n");
 
-        // 3. Current room description
-        if let Some(room) = world.spatial.rooms.get(&char_state.location) {
-            prompt.push_str("**Current Location:**\n");
-            prompt.push_str(&format!("{}\n\n", room.name));
-            prompt.push_str(&format!("{}\n\n", room.description));
+        // 3. Active scene context (if in a scene)
+        if let Some(scene_output) = scene_context {
+            prompt.push_str(&format_scene_for_prompt(scene_output));
+            prompt.push_str("\n\n");
+        } else {
+            // 3b. Current room description (only if not in scene)
+            if let Some(room) = world.spatial.rooms.get(&char_state.location) {
+                prompt.push_str("**Current Location:**\n");
+                prompt.push_str(&format!("{}\n\n", room.name));
+                prompt.push_str(&format!("{}\n\n", room.description));
 
-            if !room.exits.is_empty() {
-                prompt.push_str("Exits: ");
-                let exits: Vec<String> = room.exits.keys().map(|s| s.to_string()).collect();
-                prompt.push_str(&exits.join(", "));
-                prompt.push_str("\n\n");
-            }
+                if !room.exits.is_empty() {
+                    prompt.push_str("Exits: ");
+                    let exits: Vec<String> = room.exits.keys().map(|s| s.to_string()).collect();
+                    prompt.push_str(&exits.join(", "));
+                    prompt.push_str("\n\n");
+                }
 
-            if !room.objects.is_empty() {
-                prompt.push_str("Items here: ");
-                let items: Vec<String> = room
-                    .objects
-                    .iter()
-                    .filter_map(|id| world.object_defs.get(id))
-                    .map(|obj| obj.name.to_string())
-                    .collect();
-                prompt.push_str(&items.join(", "));
-                prompt.push_str("\n\n");
-            }
-
-            if !room.npcs.is_empty() {
-                prompt.push_str("NPCs here: ");
-                let npcs: Vec<String> = room
-                    .npcs
-                    .iter()
-                    .filter_map(|id| world.npc_defs.get(id))
-                    .map(|npc| npc.name.to_string())
-                    .collect();
-                prompt.push_str(&npcs.join(", "));
-                prompt.push_str("\n\n");
-            }
-
-            // Show other characters
-            let other_chars: Vec<&SmolStr> = room
-                .characters
-                .iter()
-                .filter(|c| c.as_str() != character.name)
-                .collect();
-
-            if !other_chars.is_empty() {
-                prompt.push_str("Also here: ");
-                prompt.push_str(
-                    &other_chars
+                if !room.objects.is_empty() {
+                    prompt.push_str("Items here: ");
+                    let items: Vec<String> = room
+                        .objects
                         .iter()
-                        .map(|c| c.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                );
-                prompt.push_str("\n\n");
+                        .filter_map(|id| world.object_defs.get(id))
+                        .map(|obj| obj.name.to_string())
+                        .collect();
+                    prompt.push_str(&items.join(", "));
+                    prompt.push_str("\n\n");
+                }
+
+                if !room.npcs.is_empty() {
+                    prompt.push_str("NPCs here: ");
+                    let npcs: Vec<String> = room
+                        .npcs
+                        .iter()
+                        .filter_map(|id| world.npc_defs.get(id))
+                        .map(|npc| npc.name.to_string())
+                        .collect();
+                    prompt.push_str(&npcs.join(", "));
+                    prompt.push_str("\n\n");
+                }
+
+                // Show other characters
+                let other_chars: Vec<&SmolStr> = room
+                    .characters
+                    .iter()
+                    .filter(|c| c.as_str() != character.name)
+                    .collect();
+
+                if !other_chars.is_empty() {
+                    prompt.push_str("Also here: ");
+                    prompt.push_str(
+                        &other_chars
+                            .iter()
+                            .map(|c| c.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    );
+                    prompt.push_str("\n\n");
+                }
             }
         }
     }
@@ -160,12 +168,64 @@ pub fn build_turn_prompt(
 
     // 7. Instructions
     prompt.push_str("**Instructions:**\n");
-    prompt.push_str("1. Think about what you want to do based on the situation\n");
-    prompt.push_str("2. Choose ONE tool to use\n");
-    prompt.push_str("3. Respond with your thinking, then use the tool\n\n");
-    prompt.push_str("Format: Write your thoughts, then <tool>toolname args</tool>\n\n");
-    prompt.push_str("Example: \"I should explore the area. <tool>look</tool>\"\n\n");
+    if scene_context.is_some() {
+        prompt.push_str("1. Consider how you want to respond in this conversation\n");
+        prompt.push_str("2. Use `choose N` to select your response\n");
+        prompt.push_str("3. Respond with your thinking, then use the tool\n\n");
+        prompt.push_str("Format: Write your thoughts, then <tool>choose N</tool>\n\n");
+        prompt.push_str("Example: \"I want to ask about the quest. <tool>choose 1</tool>\"\n\n");
+    } else {
+        prompt.push_str("1. Think about what you want to do based on the situation\n");
+        prompt.push_str("2. Choose ONE tool to use\n");
+        prompt.push_str("3. Respond with your thinking, then use the tool\n\n");
+        prompt.push_str("Format: Write your thoughts, then <tool>toolname args</tool>\n\n");
+        prompt.push_str("Example: \"I should explore the area. <tool>look</tool>\"\n\n");
+    }
     prompt.push_str("Your turn:");
 
     prompt
+}
+
+/// Get scene output for a character if they're in an active scene.
+pub fn get_active_scene_output(
+    world: &WorldState,
+    character: &str,
+    scene_manager: &mut SceneManager,
+) -> Option<SceneOutput> {
+    let char_state = world.get_character(character)?;
+    let active_scene = char_state.active_scene.as_ref()?;
+
+    // Load scene and get current state
+    let scene = scene_manager.load_scene(&active_scene.scene_id).ok()?;
+
+    // Create a temporary runtime to get current state without modifying world
+    // We need to reconstruct the scene state from the stored passage
+    use crate::scenes::SceneContext;
+    use spween::Runtime;
+
+    // Create a dummy world clone just to read scene state
+    // This is a bit wasteful but ensures we don't modify state
+    let mut world_clone = world.clone();
+    let context = SceneContext::new(&mut world_clone, character.into());
+    let mut runtime = Runtime::new(scene, context).ok()?;
+
+    // Jump to current passage if not at intro
+    if active_scene.current_passage.as_str() != "intro" {
+        runtime.jump_to(&active_scene.current_passage).ok()?;
+    }
+
+    let prose = runtime.current_prose().unwrap_or_default();
+    let choices: Vec<(usize, String, bool)> = runtime
+        .current_choices()
+        .into_iter()
+        .map(|c| (c.index, c.text.to_string(), c.available))
+        .collect();
+    let ended = runtime.is_ended();
+
+    Some(SceneOutput {
+        prose,
+        choices,
+        ended,
+        summary: String::new(),
+    })
 }

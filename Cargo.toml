@@ -23,7 +23,7 @@ toml = "0.8"
 ron = "0.8"
 
 # Strings
-smol_str = { version = "0.2", features = ["serde"] }
+smol_str = { version = "0.3", features = ["serde"] }
 
 # Error handling
 thiserror = "1"
@@ -39,3 +39,6 @@ lazy_static = "1.4"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Scene/dialogue system
+spween = { path = "../spween" }
