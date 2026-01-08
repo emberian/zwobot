@@ -18,6 +18,15 @@ pub struct TopicConfig {
     pub max_tokens: u32,
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    #[serde(default)]
+    pub characters: Vec<Character>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct Character {
+    pub name: String,
+    #[serde(default)]
+    pub system_prompt: String,
 }
 
 fn default_max_tokens() -> u32 {
@@ -26,6 +35,20 @@ fn default_max_tokens() -> u32 {
 
 fn default_temperature() -> f32 {
     0.7
+}
+
+impl TopicConfig {
+    /// Get characters for this topic, or a default assistant if none configured
+    pub fn get_characters(&self) -> Vec<Character> {
+        if self.characters.is_empty() {
+            vec![Character {
+                name: "Assistant".to_string(),
+                system_prompt: "You are a helpful AI assistant participating in a conversation.".to_string(),
+            }]
+        } else {
+            self.characters.clone()
+        }
+    }
 }
 
 impl AppConfig {

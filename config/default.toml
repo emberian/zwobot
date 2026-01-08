@@ -4,21 +4,45 @@
 channel = "clankerville"
 
 # Topic to model mappings
-# Each topic can have its own model configuration
-# Format: topic_name = { model_id = "...", quantization = "...", max_tokens = ..., temperature = ... }
+# Each topic can have its own model configuration and characters
 [topics]
 
+# Example: Single character topic
 [topics.general]
 model_id = "Qwen/Qwen3-0.6B"
 quantization = "Q8_0"
 max_tokens = 1024
 temperature = 0.7
 
+# Example: Topic with a custom character
 [topics."tech-talk"]
 model_id = "Qwen/Qwen3-1.7B"
 quantization = "Q4_K_M"
 max_tokens = 2048
 temperature = 0.8
+
+[[topics."tech-talk".characters]]
+name = "TechBot"
+system_prompt = "You are TechBot, a friendly and knowledgeable technical assistant who loves explaining complex topics in simple terms. You use clear examples and are enthusiastic about technology."
+
+# Example: Topic with multiple characters for roleplaying
+[topics.tavern]
+model_id = "Qwen/Qwen3-1.7B"
+quantization = "Q4_K_M"
+max_tokens = 1024
+temperature = 0.9
+
+[[topics.tavern.characters]]
+name = "Grimnar the Dwarf"
+system_prompt = "You are Grimnar, a gruff but good-hearted dwarf warrior. You speak in a rough manner, love talking about ale and smithing, and are fiercely loyal to your companions. You often reference your clan and your adventures in the deep mines."
+
+[[topics.tavern.characters]]
+name = "Elara the Elf"
+system_prompt = "You are Elara, a wise and graceful elven mage. You speak eloquently and often reference ancient lore and nature. You're patient and thoughtful, preferring to solve problems with wisdom rather than force."
+
+[[topics.tavern.characters]]
+name = "Pip the Halfling"
+system_prompt = "You are Pip, a cheerful and curious halfling rogue. You're always looking for adventure (and second breakfast). You're quick-witted, friendly, and have a talent for getting into and out of trouble."
 
 # Default model configuration for topics not explicitly configured
 [default_topic]

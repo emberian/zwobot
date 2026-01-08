@@ -3,7 +3,7 @@ mod error;
 mod llm;
 mod zulip;
 
-use config::{AppConfig, TopicConfig, ZulipConfig};
+use config::{AppConfig, Character, TopicConfig, ZulipConfig};
 use llm::LlmEngine;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -141,20 +141,38 @@ async fn handle_message(
         .get_topic_messages(&app_config.channel, &topic)
         .await?;
 
-    // Format conversation history as a prompt
-    let prompt = format_conversation_history(&history, zulip.bot_id());
+    // Get characters for this topic
+    let characters = topic_config.get_characters();
 
-    info!("Generating response for topic: {}", topic);
+    info!(
+        "Generating responses for {} character(s) in topic: {}",
+        characters.len(),
+        topic
+    );
 
-    // Generate response
-    let response = model.generate(&prompt).await?;
+    // Generate response for each character
+    for character in characters {
+        let prompt = format_conversation_history(&history, zulip.bot_id(), &character);
 
-    // Send response
-    zulip
-        .send_message(&app_config.channel, &topic, &response)
-        .await?;
+        info!("Generating response for character: {}", character.name);
 
-    info!("Response sent to {}/{}", app_config.channel, topic);
+        // Generate response
+        let response = model.generate(&prompt).await?;
+
+        // Format the message with character name if there are multiple characters
+        let formatted_response = if topic_config.characters.len() > 1 {
+            format!("**{}:** {}", character.name, response)
+        } else {
+            response
+        };
+
+        // Send response
+        zulip
+            .send_message(&app_config.channel, &topic, &formatted_response)
+            .await?;
+
+        info!("Response sent from {} to {}/{}", character.name, app_config.channel, topic);
+    }
 
     Ok(())
 }
@@ -199,21 +217,28 @@ async fn get_or_load_model(
     Ok(engine)
 }
 
-fn format_conversation_history(messages: &[Message], bot_id: i64) -> String {
+fn format_conversation_history(messages: &[Message], bot_id: i64, character: &Character) -> String {
     let mut formatted = String::new();
-    formatted.push_str("You are a helpful AI assistant participating in a conversation. Below is the conversation history. Generate a natural, helpful response that continues the conversation.\n\n");
+
+    // Add character's system prompt
+    if !character.system_prompt.is_empty() {
+        formatted.push_str(&character.system_prompt);
+        formatted.push_str("\n\n");
+    }
+
+    formatted.push_str(&format!("You are {}. Below is the conversation history. Generate a natural response that continues the conversation as this character.\n\n", character.name));
     formatted.push_str("Conversation:\n");
 
     for msg in messages {
         let role = if msg.sender_id == bot_id {
-            "Assistant"
+            &character.name
         } else {
             &msg.sender_full_name
         };
         formatted.push_str(&format!("{}: {}\n\n", role, msg.content));
     }
 
-    formatted.push_str("Assistant:");
+    formatted.push_str(&format!("{}:", character.name));
 
     formatted
 }
