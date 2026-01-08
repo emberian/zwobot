@@ -1,3 +1,3 @@
 mod coordinator;
 
-pub use coordinator::{ActionRecord, TurnCoordinator};
+pub use coordinator::TurnCoordinator;
