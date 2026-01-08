@@ -1,6 +1,7 @@
 mod config;
 mod error;
 mod llm;
+mod world;
 mod zulip;
 
 use config::{AppConfig, Character, TopicConfig, ZulipConfig};
