@@ -2,26 +2,18 @@ mod bot_control;
 mod config;
 mod error;
 mod llm;
-mod prompts;
-mod tools;
-mod turn;
-mod world;
 mod zulip;
 mod zulip_logger;
 
-use bot_control::{ControlContext, ModelState};
-use config::{AppConfig, TopicConfig, ZulipConfig};
+use bot_control::{ControlContext, ModelCache, ModelState};
+use config::{AppConfig, ModelConfig, ZulipConfig};
 use llm::LlmEngine;
-use prompts::{build_interpreter_prompt, extract_action, extract_narrative};
-use smol_str::SmolStr;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tools::{execute_tool, get_available_tools};
 use tracing::{debug, error, info, trace, Level};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use world::WorldState;
 use zulip::{Message, ZulipClient};
 use zulip_logger::ZulipLayer;
 
@@ -37,8 +29,16 @@ enum ModelLoadResult {
     Failed(String),
 }
 
-type ModelCache = Arc<RwLock<HashMap<String, ModelState>>>;
-type WorldCache = Arc<RwLock<HashMap<String, WorldState>>>;
+/// Debate state for a topic
+#[derive(Clone, Default)]
+struct DebateState {
+    /// History of the debate: (speaker, message) pairs
+    history: Vec<(String, String)>,
+    /// Current debate topic/proposition
+    proposition: Option<String>,
+}
+
+type DebateCache = Arc<RwLock<HashMap<String, DebateState>>>;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -69,15 +69,15 @@ async fn main() -> anyhow::Result<()> {
         .with(zulip_layer)
         .init();
 
-    info!("Starting zwobot...");
+    info!("Starting zwobot debate club...");
     info!("Configuration loaded");
     info!("Monitoring channel: {}", app_config.channel);
 
-    // Model cache: topic -> LlmEngine
+    // Model cache: topic -> LlmEngine (for opponent models)
     let models: ModelCache = Arc::new(RwLock::new(HashMap::new()));
 
-    // World state cache: topic -> WorldState
-    let worlds: WorldCache = Arc::new(RwLock::new(HashMap::new()));
+    // Debate state cache: topic -> DebateState
+    let debates: DebateCache = Arc::new(RwLock::new(HashMap::new()));
 
     // Register for real-time message events
     let (mut queue_id, mut last_event_id) = zulip.register_queue(&["message"]).await?;
@@ -96,11 +96,11 @@ async fn main() -> anyhow::Result<()> {
                             let zulip = zulip.clone();
                             let app_config = app_config.clone();
                             let models = models.clone();
-                            let worlds = worlds.clone();
+                            let debates = debates.clone();
 
                             tokio::spawn(async move {
                                 if let Err(e) =
-                                    handle_message(zulip, app_config, models, worlds, message).await
+                                    handle_message(zulip, app_config, models, debates, message).await
                                 {
                                     error!("Error handling message: {}", e);
                                 }
@@ -137,7 +137,7 @@ async fn handle_message(
     zulip: Arc<ZulipClient>,
     app_config: AppConfig,
     models: ModelCache,
-    worlds: WorldCache,
+    debates: DebateCache,
     message: Message,
 ) -> anyhow::Result<()> {
     // Get stream name from display_recipient
@@ -164,15 +164,15 @@ async fn handle_message(
 
     let topic = message.subject.clone();
     let message_id = message.id;
-    let player_name = message.sender_full_name.clone();
-    let player_message = message.content.clone();
+    let sender_name = message.sender_full_name.clone();
+    let user_message = message.content.clone();
 
     info!(
         "Received message in {}/{} from {}: {}",
         stream_name,
         topic,
-        player_name,
-        player_message.chars().take(50).collect::<String>()
+        sender_name,
+        user_message.chars().take(50).collect::<String>()
     );
 
     // Add progress indicator (working emoji)
@@ -186,12 +186,9 @@ async fn handle_message(
             let ctx = ControlContext {
                 zulip: zulip.clone(),
                 models: models.clone(),
-                worlds: worlds.clone(),
-                coordinators: Arc::new(RwLock::new(HashMap::new())), // Placeholder
                 app_config: app_config.clone(),
             };
             let result = bot_control::handle_control_message(&ctx, &message, "bot-control").await;
-            // Remove progress indicator and add completion
             let _ = zulip.remove_reaction(message_id, "working").await;
             let _ = zulip.add_reaction(message_id, "white_check_mark").await;
             return result;
@@ -203,37 +200,151 @@ async fn handle_message(
             return Ok(());
         }
         _ => {
-            // Regular game topic, continue processing
+            // Debate club topic, continue processing
         }
     }
 
-    // Get topic config
-    let topic_config = app_config.get_topic_config(&topic);
-    debug!(
-        "Topic config: model={} quant={}",
-        topic_config.model_id,
-        topic_config.quantization
+    // Check for special commands
+    let trimmed = user_message.trim().to_lowercase();
+
+    // "judge" command - get the large LLM to judge the debate
+    if trimmed == "judge" || trimmed == "judge!" || trimmed.starts_with("judge the debate") {
+        return handle_judge(
+            zulip,
+            app_config,
+            models,
+            debates,
+            &topic,
+            message_id,
+        ).await;
+    }
+
+    // "new debate:" command - start a new debate with a proposition
+    if trimmed.starts_with("new debate:") || trimmed.starts_with("debate:") {
+        let proposition = if trimmed.starts_with("new debate:") {
+            user_message.trim()[11..].trim().to_string()
+        } else {
+            user_message.trim()[7..].trim().to_string()
+        };
+
+        return handle_new_debate(
+            zulip,
+            app_config,
+            debates,
+            &topic,
+            &sender_name,
+            &proposition,
+            message_id,
+        ).await;
+    }
+
+    // "reset" command - clear the debate history
+    if trimmed == "reset" || trimmed == "clear" || trimmed == "new" {
+        {
+            let mut debates_write = debates.write().await;
+            debates_write.remove(&topic);
+        }
+        let _ = zulip.remove_reaction(message_id, "working").await;
+        let _ = zulip.add_reaction(message_id, "white_check_mark").await;
+        zulip.send_message(&app_config.channel, &topic, "Debate cleared. Start a new one with `debate: <proposition>`").await?;
+        return Ok(());
+    }
+
+    // Regular debate message - human is making an argument
+    handle_debate_turn(
+        zulip,
+        app_config,
+        models,
+        debates,
+        &topic,
+        &sender_name,
+        &user_message,
+        message_id,
+    ).await
+}
+
+async fn handle_new_debate(
+    zulip: Arc<ZulipClient>,
+    app_config: AppConfig,
+    debates: DebateCache,
+    topic: &str,
+    sender_name: &str,
+    proposition: &str,
+    message_id: i64,
+) -> anyhow::Result<()> {
+    // Initialize new debate state
+    {
+        let mut debates_write = debates.write().await;
+        debates_write.insert(topic.to_string(), DebateState {
+            history: vec![],
+            proposition: Some(proposition.to_string()),
+        });
+    }
+
+    let response = format!(
+        "**New Debate Started!**\n\n\
+         **Proposition:** {}\n\n\
+         {} will argue **FOR** the proposition.\n\
+         I will argue **AGAINST** it.\n\n\
+         Make your opening argument! When you're ready for judgment, say `judge`.",
+        proposition, sender_name
     );
 
-    // Get or load model for this topic (non-blocking)
+    let _ = zulip.remove_reaction(message_id, "working").await;
+    let _ = zulip.add_reaction(message_id, "white_check_mark").await;
+    zulip.send_message(&app_config.channel, topic, &response).await?;
+
+    Ok(())
+}
+
+async fn handle_debate_turn(
+    zulip: Arc<ZulipClient>,
+    app_config: AppConfig,
+    models: ModelCache,
+    debates: DebateCache,
+    topic: &str,
+    sender_name: &str,
+    user_message: &str,
+    message_id: i64,
+) -> anyhow::Result<()> {
+    // Get or create debate state
+    let (debate_state, proposition) = {
+        let debates_read = debates.read().await;
+        match debates_read.get(topic) {
+            Some(state) => (state.clone(), state.proposition.clone()),
+            None => {
+                // No active debate - prompt user to start one
+                let _ = zulip.remove_reaction(message_id, "working").await;
+                zulip.send_message(
+                    &app_config.channel,
+                    topic,
+                    "No active debate. Start one with `debate: <your proposition>`"
+                ).await?;
+                return Ok(());
+            }
+        }
+    };
+
+    let proposition = proposition.unwrap_or_else(|| "the given topic".to_string());
+
+    // Add human's argument to history
+    {
+        let mut debates_write = debates.write().await;
+        if let Some(state) = debates_write.get_mut(topic) {
+            state.history.push((sender_name.to_string(), user_message.to_string()));
+        }
+    }
+
+    // Get or load opponent model
     let model = match get_or_load_model(
         models.clone(),
         zulip.clone(),
         &app_config.channel,
-        &topic,
-        topic_config.clone(),
-    )
-    .await
-    {
+        topic,
+        &app_config.debate_opponent,
+    ).await {
         ModelLoadResult::Ready(engine) => engine,
-        ModelLoadResult::StartedLoading => {
-            // Model download started in background, we've already notified the user
-            let _ = zulip.remove_reaction(message_id, "working").await;
-            let _ = zulip.add_reaction(message_id, "hourglass").await;
-            return Ok(());
-        }
-        ModelLoadResult::AlreadyLoading => {
-            // Model is still loading from a previous request
+        ModelLoadResult::StartedLoading | ModelLoadResult::AlreadyLoading => {
             let _ = zulip.remove_reaction(message_id, "working").await;
             let _ = zulip.add_reaction(message_id, "hourglass").await;
             return Ok(());
@@ -241,164 +352,194 @@ async fn handle_message(
         ModelLoadResult::Failed(err) => {
             let _ = zulip.remove_reaction(message_id, "working").await;
             let _ = zulip.add_reaction(message_id, "x").await;
-            zulip
-                .send_message(&app_config.channel, &topic, &format!("Model loading failed: {}", err))
-                .await?;
+            zulip.send_message(&app_config.channel, topic, &format!("Model loading failed: {}", err)).await?;
             return Ok(());
         }
     };
 
-    // Get or load world state for this topic
-    let mut world = get_or_load_world(&worlds, &topic, &app_config.world_data_path).await?;
+    // Build prompt for opponent
+    let prompt = build_opponent_prompt(&debate_state, &proposition, sender_name, user_message);
+    trace!("Opponent prompt: {}", prompt);
 
-    // Ensure player exists in world (use Zulip username as character name)
-    let player_smol: SmolStr = player_name.clone().into();
-    ensure_player_in_world(&mut world, &player_smol);
+    // Generate opponent response
+    debug!("Generating opponent response");
+    let opponent_response = model.generate(&prompt).await?;
+    info!("Opponent response (first 200 chars): {}", opponent_response.chars().take(200).collect::<String>());
 
-    info!("Processing player command from {} in topic {}", player_name, topic);
-
-    // === NEW FLOW: Human is player, LLM interprets and narrates ===
-
-    // 1. Build interpreter prompt
-    debug!("Building interpreter prompt");
-    let prompt = build_interpreter_prompt(&world, &player_name, &player_message);
-    trace!("Prompt length: {} chars", prompt.len());
-
-    // 2. LLM interprets player intent and narrates
-    debug!("Calling LLM for interpretation");
-    let llm_output = model.generate(&prompt).await?;
-    info!("LLM output (first 200 chars): {}", llm_output.chars().take(200).collect::<String>());
-
-    // 3. Extract action and narrative from LLM output
-    let action_str = extract_action(&llm_output);
-    let narrative = extract_narrative(&llm_output);
-
-    // 4. Parse and execute the action
-    let response = if let Some(action) = action_str {
-        debug!("Extracted action: {}", action);
-
-        // Parse into tool call format
-        let parts: Vec<&str> = action.split_whitespace().collect();
-        if parts.is_empty() {
-            format!("{}\n\n*[No action understood]*", narrative)
-        } else {
-            let tool_name = parts[0].to_lowercase();
-            let args: Vec<SmolStr> = parts[1..].iter().map(|s| (*s).into()).collect();
-
-            let tool_call = tools::definitions::ToolCall {
-                thinking: String::new(),
-                tool_name: tool_name.into(),
-                args,
-            };
-
-            // Execute the tool
-            match execute_tool(&mut world, &player_smol, &tool_call) {
-                Ok(result) => {
-                    debug!("Tool execution successful: {}", result.summary);
-
-                    // Build response with narrative + affordances
-                    let affordances = format_affordances_for_player(&world, &player_smol);
-                    format!("{}\n\n---\n*{}*", narrative, affordances)
-                }
-                Err(e) => {
-                    error!("Tool execution error: {}", e);
-                    format!("{}\n\n*[Error: {}]*", narrative, e)
-                }
-            }
+    // Add opponent's response to history
+    {
+        let mut debates_write = debates.write().await;
+        if let Some(state) = debates_write.get_mut(topic) {
+            state.history.push(("Opponent".to_string(), opponent_response.clone()));
         }
-    } else {
-        // No action found - just return the narrative
-        debug!("No action tag found in LLM output");
-        narrative
-    };
+    }
 
-    // 5. Send response to Zulip
-    debug!("Sending response to Zulip");
-    zulip
-        .send_message(&app_config.channel, &topic, &response)
-        .await?;
-
-    // 6. Save world state
-    debug!("Saving world state");
-    save_world(&worlds, &topic, world).await?;
-
-    // Remove progress indicator and add completion emoji
-    debug!("Removing progress indicator from message {}", message_id);
+    // Send response
     let _ = zulip.remove_reaction(message_id, "working").await;
     let _ = zulip.add_reaction(message_id, "white_check_mark").await;
+    zulip.send_message(&app_config.channel, topic, &opponent_response).await?;
 
-    debug!("Message handling complete for topic: {}", topic);
     Ok(())
 }
 
-/// Format available actions as a player-friendly hint
-fn format_affordances_for_player(world: &WorldState, player: &SmolStr) -> String {
-    let char_state = match world.get_character(player) {
-        Some(cs) => cs,
-        None => return "You can: look around".to_string(),
+async fn handle_judge(
+    zulip: Arc<ZulipClient>,
+    app_config: AppConfig,
+    models: ModelCache,
+    debates: DebateCache,
+    topic: &str,
+    message_id: i64,
+) -> anyhow::Result<()> {
+    // Get debate state
+    let debate_state = {
+        let debates_read = debates.read().await;
+        match debates_read.get(topic) {
+            Some(state) => state.clone(),
+            None => {
+                let _ = zulip.remove_reaction(message_id, "working").await;
+                zulip.send_message(&app_config.channel, topic, "No debate to judge. Start one with `debate: <proposition>`").await?;
+                return Ok(());
+            }
+        }
     };
 
-    let room = match world.spatial.rooms.get(&char_state.location) {
-        Some(r) => r,
-        None => return "You can: look around".to_string(),
+    if debate_state.history.is_empty() {
+        let _ = zulip.remove_reaction(message_id, "working").await;
+        zulip.send_message(&app_config.channel, topic, "The debate has no arguments yet!").await?;
+        return Ok(());
+    }
+
+    // Load the judge model (this uses a special cache key)
+    let judge_cache_key = format!("{}_judge", topic);
+    let judge = match get_or_load_model(
+        models.clone(),
+        zulip.clone(),
+        &app_config.channel,
+        &judge_cache_key,
+        &app_config.debate_judge,
+    ).await {
+        ModelLoadResult::Ready(engine) => engine,
+        ModelLoadResult::StartedLoading | ModelLoadResult::AlreadyLoading => {
+            let _ = zulip.remove_reaction(message_id, "working").await;
+            let _ = zulip.add_reaction(message_id, "hourglass").await;
+            zulip.send_message(&app_config.channel, topic, "Loading the judge model... I'll render judgment soon.").await?;
+            return Ok(());
+        }
+        ModelLoadResult::Failed(err) => {
+            let _ = zulip.remove_reaction(message_id, "working").await;
+            let _ = zulip.add_reaction(message_id, "x").await;
+            zulip.send_message(&app_config.channel, topic, &format!("Judge model loading failed: {}", err)).await?;
+            return Ok(());
+        }
     };
 
-    let mut hints = Vec::new();
+    // Build judge prompt
+    let prompt = build_judge_prompt(&debate_state);
+    trace!("Judge prompt: {}", prompt);
 
-    // Movement
-    if !room.exits.is_empty() {
-        let exits: Vec<String> = room.exits.keys().map(|s| s.to_string()).collect();
-        hints.push(format!("go {}", exits.join("/")));
+    // Generate judgment
+    debug!("Generating judgment");
+    let judgment = judge.generate(&prompt).await?;
+    info!("Judgment (first 200 chars): {}", judgment.chars().take(200).collect::<String>());
+
+    // Clear the debate after judgment
+    {
+        let mut debates_write = debates.write().await;
+        debates_write.remove(topic);
     }
 
-    // Items
-    if !room.objects.is_empty() {
-        hints.push("examine/take items".to_string());
+    // Send judgment
+    let response = format!("**The Judge's Verdict**\n\n{}\n\n---\n*Debate concluded. Start a new one with `debate: <proposition>`*", judgment);
+    let _ = zulip.remove_reaction(message_id, "working").await;
+    let _ = zulip.add_reaction(message_id, "scales").await;
+    zulip.send_message(&app_config.channel, topic, &response).await?;
+
+    Ok(())
+}
+
+fn build_opponent_prompt(debate_state: &DebateState, proposition: &str, human_name: &str, human_argument: &str) -> String {
+    let mut prompt = format!(
+        "You are a skilled debater arguing AGAINST the following proposition:\n\n\
+         \"{}\"\n\n\
+         Your opponent {} is arguing FOR this proposition.\n\n",
+        proposition, human_name
+    );
+
+    // Add debate history
+    if !debate_state.history.is_empty() {
+        prompt.push_str("Previous exchanges:\n");
+        for (speaker, msg) in &debate_state.history {
+            if speaker == "Opponent" {
+                prompt.push_str(&format!("You: {}\n\n", msg));
+            } else {
+                prompt.push_str(&format!("{}: {}\n\n", speaker, msg));
+            }
+        }
     }
 
-    // NPCs
-    if !room.npcs.is_empty() {
-        let npc_names: Vec<String> = room
-            .npcs
-            .iter()
-            .filter_map(|id| world.npc_defs.get(id))
-            .map(|npc| npc.name.to_string())
-            .collect();
-        hints.push(format!("talk to {}", npc_names.join(", ")));
+    prompt.push_str(&format!(
+        "{} just said:\n\"{}\"\n\n\
+         Respond with a compelling counter-argument. Be concise but persuasive. \
+         Address their specific points and make your case clearly.",
+        human_name, human_argument
+    ));
+
+    prompt
+}
+
+fn build_judge_prompt(debate_state: &DebateState) -> String {
+    let proposition = debate_state.proposition.as_deref().unwrap_or("the given topic");
+
+    let mut prompt = format!(
+        "You are an impartial judge evaluating a debate on the following proposition:\n\n\
+         \"{}\"\n\n\
+         Here is the complete debate:\n\n",
+        proposition
+    );
+
+    for (speaker, msg) in &debate_state.history {
+        let role = if speaker == "Opponent" {
+            "AGAINST".to_string()
+        } else {
+            format!("FOR ({})", speaker)
+        };
+        prompt.push_str(&format!("[{}]: {}\n\n", role, msg));
     }
 
-    // Inventory
-    if !char_state.inventory.is_empty() {
-        hints.push("check inventory".to_string());
-    }
+    prompt.push_str(
+        "Please evaluate this debate and declare a winner. Consider:\n\
+         1. Strength of arguments and evidence\n\
+         2. Logical reasoning and coherence\n\
+         3. Effective rebuttals of opposing points\n\
+         4. Overall persuasiveness\n\n\
+         Provide a brief analysis and then clearly state who won the debate and why."
+    );
 
-    hints.push("look around".to_string());
-
-    format!("You can: {}", hints.join(" | "))
+    prompt
 }
 
 async fn get_or_load_model(
     models: ModelCache,
     zulip: Arc<ZulipClient>,
     channel: &str,
-    topic: &str,
-    config: TopicConfig,
+    cache_key: &str,
+    config: &ModelConfig,
 ) -> ModelLoadResult {
     // Check current state
     {
         let models_read = models.read().await;
-        if let Some(state) = models_read.get(topic) {
+        if let Some(state) = models_read.get(cache_key) {
             match state {
                 ModelState::Ready(engine) => {
-                    debug!("Using cached model for topic '{}'", topic);
+                    debug!("Using cached model for '{}'", cache_key);
                     return ModelLoadResult::Ready(engine.clone());
                 }
                 ModelState::Loading => {
-                    debug!("Model for topic '{}' is still loading", topic);
+                    debug!("Model for '{}' is still loading", cache_key);
                     return ModelLoadResult::AlreadyLoading;
                 }
                 ModelState::Failed(err) => {
-                    debug!("Model for topic '{}' previously failed: {}", topic, err);
+                    debug!("Model for '{}' previously failed: {}", cache_key, err);
                     return ModelLoadResult::Failed(err.clone());
                 }
             }
@@ -408,18 +549,18 @@ async fn get_or_load_model(
     // Mark as loading
     {
         let mut models_write = models.write().await;
-        models_write.insert(topic.to_string(), ModelState::Loading);
+        models_write.insert(cache_key.to_string(), ModelState::Loading);
     }
 
     // Notify user that we're downloading
     info!(
-        "Starting model download for topic '{}': {} {}",
-        topic, config.model_id, config.quantization
+        "Starting model download for '{}': {} {}",
+        cache_key, config.model_id, config.quantization
     );
     let _ = zulip
         .send_message(
             channel,
-            topic,
+            cache_key.trim_end_matches("_judge"),
             &format!(
                 "Downloading model **{}** ({})... I'll respond once it's ready.",
                 config.model_id, config.quantization
@@ -429,105 +570,34 @@ async fn get_or_load_model(
 
     // Spawn the download in background
     let models_clone = models.clone();
-    let topic_owned = topic.to_string();
+    let cache_key_owned = cache_key.to_string();
+    let config_clone = config.clone();
     tokio::spawn(async move {
         debug!(
-            "Background model loading started for topic '{}'",
-            topic_owned
+            "Background model loading started for '{}'",
+            cache_key_owned
         );
 
         let result = LlmEngine::new(
-            &config.model_id,
-            &config.quantization,
-            config.max_tokens,
-            config.temperature,
+            &config_clone.model_id,
+            &config_clone.quantization,
+            config_clone.max_tokens,
+            config_clone.temperature,
         )
         .await;
 
         let mut models_write = models_clone.write().await;
         match result {
             Ok(engine) => {
-                info!("Model loaded successfully for topic '{}'", topic_owned);
-                models_write.insert(topic_owned, ModelState::Ready(Arc::new(engine)));
+                info!("Model loaded successfully for '{}'", cache_key_owned);
+                models_write.insert(cache_key_owned, ModelState::Ready(Arc::new(engine)));
             }
             Err(e) => {
-                error!("Model loading failed for topic '{}': {}", topic_owned, e);
-                models_write.insert(topic_owned, ModelState::Failed(e.to_string()));
+                error!("Model loading failed for '{}': {}", cache_key_owned, e);
+                models_write.insert(cache_key_owned, ModelState::Failed(e.to_string()));
             }
         }
     });
 
     ModelLoadResult::StartedLoading
-}
-
-async fn get_or_load_world(
-    worlds: &WorldCache,
-    topic: &str,
-    template_path: &str,
-) -> anyhow::Result<WorldState> {
-    // Check if world is already loaded for this topic
-    {
-        let worlds_read = worlds.read().await;
-        if let Some(world) = worlds_read.get(topic) {
-            debug!("Using cached world for topic '{}'", topic);
-            trace!("Cached world has {} characters", world.characters.len());
-            return Ok(world.clone());
-        }
-    }
-
-    // World not loaded - try to load from save file, fall back to template
-    let save_path = WorldState::save_path_for_topic(topic);
-    debug!("Loading world for topic '{}' from: {}", topic, save_path);
-    let world = WorldState::load_or_create(&save_path, template_path)?;
-    debug!("World loaded with {} rooms, {} objects, {} NPCs",
-        world.spatial.rooms.len(),
-        world.object_defs.len(),
-        world.npc_defs.len()
-    );
-
-    // Store in cache
-    {
-        let mut worlds_write = worlds.write().await;
-        worlds_write.insert(topic.to_string(), world.clone());
-        debug!("World cached for topic '{}'", topic);
-    }
-
-    info!("World state loaded for topic '{}'", topic);
-
-    Ok(world)
-}
-
-async fn save_world(
-    worlds: &WorldCache,
-    topic: &str,
-    world: WorldState,
-) -> anyhow::Result<()> {
-    // Save to disk
-    let save_path = WorldState::save_path_for_topic(topic);
-    world.save_to_file(&save_path)?;
-    info!("World state saved to {}", save_path);
-
-    // Update cache
-    {
-        let mut worlds_write = worlds.write().await;
-        worlds_write.insert(topic.to_string(), world);
-    }
-
-    Ok(())
-}
-
-fn ensure_player_in_world(world: &mut WorldState, player_name: &SmolStr) {
-    // Check if player already exists
-    if world.get_character(player_name).is_some() {
-        trace!("Player {} already exists in world", player_name);
-        return;
-    }
-
-    // Add player to starting location (tavern)
-    let starting_location: SmolStr = "tavern".into();
-
-    info!("Adding new player {} to world at {}", player_name, starting_location);
-    debug!("Player created with default stats");
-
-    world.add_character(player_name.clone(), starting_location);
 }

@@ -6,14 +6,12 @@ use std::path::Path;
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub channel: String,
-    #[serde(default = "default_world_data_path")]
-    pub world_data_path: String,
     pub topics: HashMap<String, TopicConfig>,
     pub default_topic: TopicConfig,
-}
-
-fn default_world_data_path() -> String {
-    "data/world_state.ron".to_string()
+    /// Model config for the debate opponent (medium-sized LLM)
+    pub debate_opponent: ModelConfig,
+    /// Model config for the judge (large LLM)
+    pub debate_judge: ModelConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -25,14 +23,17 @@ pub struct TopicConfig {
     #[serde(default = "default_temperature")]
     pub temperature: f32,
     #[serde(default)]
-    pub characters: Vec<Character>,
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct Character {
-    pub name: String,
-    #[serde(default)]
-    pub system_prompt: String,
+pub struct ModelConfig {
+    pub model_id: String,
+    pub quantization: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
 }
 
 fn default_max_tokens() -> u32 {
@@ -41,20 +42,6 @@ fn default_max_tokens() -> u32 {
 
 fn default_temperature() -> f32 {
     0.7
-}
-
-impl TopicConfig {
-    /// Get characters for this topic, or a default assistant if none configured
-    pub fn get_characters(&self) -> Vec<Character> {
-        if self.characters.is_empty() {
-            vec![Character {
-                name: "Assistant".to_string(),
-                system_prompt: "You are a helpful AI assistant participating in a conversation.".to_string(),
-            }]
-        } else {
-            self.characters.clone()
-        }
-    }
 }
 
 impl AppConfig {
