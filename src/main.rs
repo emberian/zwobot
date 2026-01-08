@@ -182,21 +182,32 @@ async fn handle_message(
     debug!("Adding progress indicator to message {}", message_id);
     let _ = zulip.add_reaction(message_id, "working").await;
 
-    // Handle bot-control topic
-    if topic == "bot-control" {
-        debug!("Routing to bot-control handler");
-        let ctx = ControlContext {
-            zulip: zulip.clone(),
-            models: models.clone(),
-            worlds: worlds.clone(),
-            coordinators: coordinators.clone(),
-            app_config: app_config.clone(),
-        };
-        let result = bot_control::handle_control_message(&ctx, &message, "bot-control").await;
-        // Remove progress indicator and add completion
-        let _ = zulip.remove_reaction(message_id, "working").await;
-        let _ = zulip.add_reaction(message_id, "white_check_mark").await;
-        return result;
+    // Handle special topics
+    match topic.as_str() {
+        "bot-control" => {
+            debug!("Routing to bot-control handler");
+            let ctx = ControlContext {
+                zulip: zulip.clone(),
+                models: models.clone(),
+                worlds: worlds.clone(),
+                coordinators: coordinators.clone(),
+                app_config: app_config.clone(),
+            };
+            let result = bot_control::handle_control_message(&ctx, &message, "bot-control").await;
+            // Remove progress indicator and add completion
+            let _ = zulip.remove_reaction(message_id, "working").await;
+            let _ = zulip.add_reaction(message_id, "white_check_mark").await;
+            return result;
+        }
+        "bot-logs" => {
+            // Ignore messages sent to bot-logs (it's for output only)
+            debug!("Ignoring message to bot-logs topic");
+            let _ = zulip.remove_reaction(message_id, "working").await;
+            return Ok(());
+        }
+        _ => {
+            // Regular game topic, continue processing
+        }
     }
 
     // Get topic config
