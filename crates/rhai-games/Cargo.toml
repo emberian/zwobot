@@ -1,0 +1,30 @@
+[package]
+name = "rhai-games"
+description = "Rhai scripting engine integration for zwobot games"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# Scripting engine
+rhai = { version = "1.19", features = ["sync", "serde"] }
+
+# Bot framework
+tulip-bot.workspace = true
+llm.workspace = true
+
+# Async
+tokio = { workspace = true, features = ["sync", "fs"] }
+
+# File watching for hot reload
+notify = "6"
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+# Logging
+tracing.workspace = true

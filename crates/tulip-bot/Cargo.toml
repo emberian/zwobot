@@ -1,0 +1,17 @@
+[package]
+name = "tulip-bot"
+description = "Bot framework for Tulip (Zulip fork) with widgets, commands, and interactions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# For BoxFuture
+futures = "0.3"

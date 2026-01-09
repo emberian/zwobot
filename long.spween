@@ -1,0 +1,643 @@
+  ---
+  id: tower_of_sorrows
+  title: The Tower of Sorrows
+  weight: 15
+  cooldown: 7200
+  tags: [fantasy, heist, mystery, moral_choice]
+  requires: { level >= 3 }
+  ---
+
+  === intro
+
+  The Tower of Sorrows looms before you, a twisted spire of obsidian and moonstone that seems to drink the very light from the sky. For three years, you've tracked the Tear of Luminous—a gem said to contain the last breath of a dying star, stolen from your family's vault by the enigmatic Archmage Thessalon.
+
+  Tonight, the tower's wards flicker and fade with the new moon. Your informant, a nervous half-elf named Mirrik, assured you that Thessalon performs a ritual in the celestial observatory at midnight, leaving the lower levels vulnerable.
+
+  You stand in the shadow of the gatehouse, feeling the weight of your choices. The tower has seven levels, each more treacherous than the last. Guards patrol the grounds—some human mercenaries, others constructs of animated stone and shadow. Your pack contains the tools of your trade, but success will require more than mere equipment.
+
+  The night wind carries the scent of rain and old magic. Time to decide your approach.
+
+  ~ hour = 23
+  ~ suspicion = 0
+  ~ guards_alerted = false
+
+  * [Approach the main gate boldly, pretending to be a visiting scholar]
+    ~ approach = "social"
+    ~ charisma += 1
+    -> main_gate_social
+
+  * [Circle to the eastern wall where the stonework is crumbling] { inventory.climbing_gear }
+    ~ approach = "stealth"
+    ~ stealth += 1
+    -> eastern_wall_climb
+
+  * [Investigate the servants' entrance near the kitchens]
+    ~ approach = "cunning"
+    -> servants_entrance
+
+  * [Use the sewer grate—disgusting, but potentially unguarded] { !squeamish }
+    ~ approach = "underground"
+    ~ stealth += 2
+    ~ clean = false
+    -> sewer_entrance
+
+  === main_gate_social
+
+  You stride confidently toward the main gate, adjusting your scholarly robes (hastily purchased from a pawn shop yesterday). Two guards—grizzled veterans with crossbows—step forward to block your path.
+
+  "Tower's closed," the taller one grunts. "Archmage sees nobody after sundown."
+
+  You clear your throat, projecting an air of indignant authority. "I am Professor Aldric Moonwhisper of the Celestial Collegium. The Archmage personally invited me to observe tonight's alignment of the three moons. Surely you received word?"
+
+  The guards exchange uncertain glances.
+
+  * [Press your advantage with more elaborate lies] { charisma >= 3 }
+    ~ suspicion += 1
+    -> gate_social_success
+
+  * [Offer a generous bribe] { inventory.gold_purse }
+    ~ suspicion -= 1
+    ~ gold -= 50
+    -> gate_bribed
+
+  * [Try to charm them with casual conversation and humor]
+    ~ charisma += 1
+    -> gate_charm_attempt
+
+  * [Abandon this approach and try another way]
+    -> intro_fallback
+
+  === gate_social_success
+
+  Your words flow with practiced ease, each lie building upon the last until you've constructed an entire fictional correspondence between yourself and Thessalon. You mention obscure astronomical phenomena, reference books that may or may not exist, and even forge a signature in mid-air using a minor illusion cantrip.
+
+  The guards' resistance crumbles like old parchment. "Right, right," the shorter one mutters. "The Archmage did mention something about... moon alignment... scholarly types..." He trails off uncertainly, but steps aside.
+
+  "Third floor is the library," he offers. "You can wait there until the Archmage summons you."
+
+  You bow with exaggerated courtesy and sweep through the gate. Inside, the tower's entrance hall is a marvel of dark architecture—vaulted ceilings disappear into shadow, and strange symbols glow faintly on the walls.
+
+  A spiral staircase winds upward, but you also notice a side corridor leading deeper into the complex.
+
+  ~ tower_access = "front_door"
+  ~ guards_suspicious = false
+
+  * [Head straight for the library on the third floor as suggested]
+    -> library_floor
+
+  * [Explore the ground floor while you have freedom of movement]
+    ~ stealth += 1
+    -> ground_floor_exploration
+
+  * [Feign needing the washroom and slip away toward the basement stairs]
+    ~ stealth += 2
+    ~ suspicion += 2
+    -> basement_infiltration
+
+  === gate_bribed
+
+  You produce your coin purse with a knowing smile, letting it jingle significantly. "Perhaps I was mistaken about the invitation," you say smoothly. "But I've come a long way, and I'm sure the Archmage wouldn't want to turn away someone who appreciates the... financial realities... of guard duty."
+
+  You pass fifty gold pieces to the taller guard, who palms them expertly. His companion looks away, pretending not to notice.
+
+  "Alright, 'Professor,'" the guard says with a smirk that suggests he knows exactly what you are. "But if anyone asks, you never came through this gate. And if I hear any alarms, we never met. Understood?"
+
+  You nod and slip inside. The guard wasn't wrong to be suspicious—but suspicion without proof means little.
+
+  ~ tower_access = "bribed_entry"
+  ~ guards_bribed = true
+  ~ suspicion += 1
+
+  * [Make for the upper floors immediately]
+    -> upper_floors_approach
+
+  * [Search for useful information or equipment on the ground floor]
+    -> ground_floor_exploration
+
+  === gate_charm_attempt
+
+  You shift tactics, adopting a more relaxed demeanor. "Look, I understand you're just doing your jobs. Long night, I'm sure. Tell me, how long have you been posted here? Must be quite something, working for an Archmage..."
+
+  You engage them in small talk, asking about their duties, their lives, the peculiarities of magical employment. The shorter guard warms up a bit, complaining about the stone constructs that never need sleep or food, making human guards feel redundant.
+
+  But the taller one remains suspicious. "Friendly chat's all well and good," he says, "but orders are orders. You're not getting in without proper documentation."
+
+  * [Push harder, trying to befriend them with stories and shared grievances]
+    ~ charisma += 1
+    -> gate_charm_continue
+
+  * [Thank them for their time and withdraw to try another approach]
+    -> intro_fallback
+
+  * [Wait for them to be distracted and try to sneak past] { stealth >= 3 }
+    ~ stealth += 2
+    ~ suspicion += 3
+    -> gate_sneak_attempt
+
+  === eastern_wall_climb
+
+  You move silently along the tower's perimeter until you reach the eastern face. Here, centuries of weather have worn the stonework, creating handholds and cracks that a skilled climber can exploit. Your climbing gear includes rope, pitons, and padded gloves.
+
+  The wall rises thirty feet to a narrow window on the second floor. You can see faint light within—someone's awake, or perhaps magic illuminates the room constantly. The ascent will be treacherous in the dark, but guards patrol the base of the wall every quarter-hour.
+
+  You wait for the patrol to pass, then begin your climb.
+
+  ~ climbing = true
+
+  * [Take your time, prioritizing silence over speed] { stealth >= 4 }
+    ~ stealth += 2
+    ~ hour += 1
+    -> window_entrance_quiet
+
+  * [Climb quickly before the patrol returns]
+    ~ suspicion += 2
+    -> window_entrance_rushed
+
+  * [Use a minor levitation spell to assist your climb] { inventory.magic_amulet }
+    ~ magic_power += 1
+    -> window_entrance_magical
+
+  === servants_entrance
+
+  The servants' entrance is a weathered wooden door set into the tower's base, partially hidden by overgrown ivy. You test the handle carefully—unlocked. Either the servants are expected to come and go, or security here is lax.
+
+  The door opens onto a narrow service corridor. The smell of cooking food drifts from somewhere ahead, mixed with soap and damp stone. Voices echo distantly—kitchen staff, by the sound of it, arguing about tomorrow's menu.
+
+  You have two options: proceed forward toward the kitchens where there will be witnesses, or look for stairs leading upward.
+
+  * [Enter the kitchens disguised as new staff] { inventory.common_clothes }
+    ~ disguise_active = true
+    -> kitchen_infiltration
+
+  * [Search for stairs while avoiding the populated areas]
+    ~ stealth += 1
+    -> servant_stairs_search
+
+  * [Wait and observe the patterns of movement before proceeding]
+    ~ caution += 1
+    ~ hour += 1
+    -> servant_observation
+
+  === sewer_entrance
+
+  You pry open the rusted grate and descend into darkness. The stench hits you immediately—centuries of waste and rot, mixed with something worse. Something magical and wrong.
+
+  Your torch reveals slick stone walls covered in phosphorescent moss. The tunnel ahead branches in three directions: left toward what sounds like running water, straight toward the tower's foundation, or right toward a faint glowing that might be magical contamination.
+
+  As you stand in the filth, you hear something moving in the darkness. Something large, breathing with a wet, rasping sound.
+
+  ~ sewer_monster_present = true
+  ~ stealth += 2
+
+  * [Move quickly and quietly toward the tower foundation]
+    ~ stealth += 1
+    -> sewer_tower_approach
+
+  * [Investigate the glowing to your right] { magic_power >= 2 }
+    ~ magic_power += 1
+    -> sewer_magical_waste
+
+  * [Follow the sound of water—there might be a cleaner path]
+    -> sewer_water_tunnel
+
+  * [Ready your weapon and prepare to fight whatever is down here]
+    ~ combat_ready = true
+    -> sewer_monster_encounter
+
+  === library_floor
+
+  You ascend the spiral stairs to the third floor, where an ornate door marked with glowing sigils announces the tower's library. The door is unlocked—after all, who would steal knowledge from an Archmage?
+
+  Inside, the library is breathtaking. Shelves stretch from floor to ceiling, packed with tomes both mundane and eldritch. A reading area features comfortable chairs and a crackling fireplace. On a desk, you spot several interesting items: a journal lying open, a map of the tower's layout, and a small crystal that pulses with soft light.
+
+  More importantly, you can hear footsteps on the floor above—the fourth level, where Thessalon's private chambers are located according to your intelligence.
+
+  * [Examine the journal—it might contain useful information]
+    ~ knowledge += 2
+    -> library_journal
+
+  * [Study the tower map to plan your route to the observatory]
+    ~ knowledge += 1
+    ~ tower_layout_known = true
+    -> library_map
+
+  * [Investigate the pulsing crystal] { magic_power >= 1 }
+    ~ magic_power += 1
+    -> library_crystal
+
+  * [Leave the library quietly and continue upward]
+    ~ stealth += 1
+    -> fourth_floor_approach
+
+  === library_journal
+
+  You open the journal carefully. The handwriting is cramped and urgent, belonging to someone named Velara—apparently Thessalon's apprentice. The recent entries are disturbing:
+
+  "Day 47: Master's obsession with the Tear deepens. He speaks to it now, as if it responds. His eyes have changed—darker, as though they reflect the void within the gem rather than the light it supposedly contains.
+
+  Day 51: I tried to reason with him today. He laughed and said I couldn't understand the voices. Voices? What voices? The Tear was stolen property, a family heirloom, nothing more. But now... now I'm not certain.
+
+  Day 53: I've hidden the silver key in the place we first met. If anyone reads this, know that the observatory door requires both the master's key AND the silver key to open. I did this to protect him from himself. The ritual he plans for the new moon... I fear what it will unleash.
+
+  Day 54: He knows. He knows I took the key. I must flee. To whoever finds this—the Tear is not what you think. It is not a gem. It is a prison. And Thessalon seeks to break its seal."
+
+  The final entry sends a chill down your spine. Whatever you thought you were stealing, the truth is more complex—and more dangerous.
+
+  ~ velara_story_known = true
+  ~ silver_key_location_known = true
+  ~ tear_is_prison = true
+
+  * [Continue reading, looking for clues about the silver key's location]
+    ~ knowledge += 1
+    -> library_journal_details
+
+  * [Close the journal and reconsider your entire mission]
+    -> library_decision_point
+
+  === library_journal_details
+
+  You flip through earlier entries, searching for mentions of "the place we first met." Velara writes fondly of her apprenticeship, and one passage stands out:
+
+  "Master found me in the greenhouse when I was just a girl, hiding from my father's anger among the moonflowers. He offered me sanctuary then, and taught me to tend the magical plants. I've spent countless hours there since."
+
+  The greenhouse! There must be a greenhouse somewhere in or near the tower. You make note of this.
+
+  ~ greenhouse_location_known = true
+
+  * [Return to the main library area and examine other items]
+    -> library_floor
+
+  * [Leave immediately to find the greenhouse]
+    -> greenhouse_search
+
+  === library_decision_point
+
+  You close the journal, mind racing. Your family hired you to retrieve the Tear of Luminous, claiming it was a priceless heirloom stolen by Thessalon three years ago. But if Velara's journal is accurate, the "gem" is actually a prison containing something terrible—and Thessalon plans to free whatever's inside.
+
+  This changes everything. Do you:
+
+  * [Continue with the original plan—steal the Tear and leave]
+    ~ motivation = "mercenary"
+    -> continue_heist
+
+  * [Try to stop Thessalon's ritual by any means necessary]
+    ~ motivation = "hero"
+    ~ suspicion += 2
+    -> stop_ritual_plan
+
+  * [Find Velara and learn more before deciding]
+    ~ motivation = "cautious"
+    ~ velara_sought = true
+    -> find_velara
+
+  * [Confront Thessalon directly and demand the truth]
+    ~ motivation = "direct"
+    ~ suspicion += 4
+    -> confront_thessalon
+
+  === fourth_floor_approach
+
+  The fourth floor is quieter, more private. Rich carpets muffle your footsteps as you navigate a corridor lined with portraits of previous tower residents—some human, some decidedly not. At the end of the hall, a large double door bears Thessalon's personal seal.
+
+  To your right, a smaller door stands ajar, revealing what appears to be a study or workshop. To your left, stairs continue upward to the fifth floor—closer to the observatory.
+
+  Through the walls, you can hear a faint chanting from somewhere high above. The ritual has begun, or is about to.
+
+  ~ fourth_floor_reached = true
+
+  * [Risk entering Thessalon's chambers while he's distracted]
+    ~ stealth += 2
+    ~ suspicion += 3
+    -> thessalon_chambers
+
+  * [Investigate the open workshop]
+    -> workshop_investigation
+
+  * [Continue climbing toward the observatory]
+    ~ hour += 1
+    -> fifth_floor_ascent
+
+  === greenhouse_search
+
+  Following the journal's clue, you search the tower for a greenhouse. On the ground floor, you discover a glass-walled addition to the main structure, accessible through a side corridor. The greenhouse is overgrown and wild, as if untended for weeks.
+
+  Moonflowers bloom impossibly in the darkness, their petals glowing with inner light. Stranger plants twist and writhe at the edges of your vision. And there, in the center, beneath a particularly massive moonflower, you spot a small box buried in the soil.
+
+  You dig it out carefully. Inside, wrapped in silk, is a silver key etched with the same celestial symbols you've seen throughout the tower.
+
+  ~ inventory.silver_key = true
+  ~ greenhouse_found = true
+
+  * [Take the key and leave immediately]
+    -> greenhouse_exit
+
+  * [Examine the greenhouse more carefully—there might be useful magical plants]
+    ~ magic_power += 1
+    -> greenhouse_exploration
+
+  === observatory_approach
+
+  You've reached the sixth floor—the level directly below the observatory. Here, the air thrums with magical energy. The walls are carved with astronomical charts and prophecies. A single staircase spirals up to the observatory door, which you can see from below.
+
+  The door is massive, wrought from silver and adamantine, covered in protective wards that shimmer in the darkness. You'll need both keys to open it, if Velara's journal spoke true. And you have { silver_key ? "both keys" : "only one key—you still need the silver key" }.
+
+  The chanting from above has grown louder. Thessalon's voice rings out, speaking in a language that predates human civilization. The ritual is well underway.
+
+  * [Use both keys to open the observatory door] { silver_key && master_key }
+    ~ suspicion += 5
+    -> observatory_entrance
+
+  * [Try to break through the wards with magic] { magic_power >= 5 }
+    ~ magic_power += 2
+    ~ suspicion += 4
+    -> observatory_force_entry
+
+  * [Wait and observe, looking for another way or a better moment]
+    ~ caution += 2
+    -> observatory_wait
+
+  * [Search this floor for anything useful before ascending]
+    -> sixth_floor_search
+
+  === observatory_entrance
+
+  You insert both keys into their respective locks. The wards flare once, blindingly bright, then dissolve like morning mist. The door swings open silently, revealing the tower's pinnacle.
+
+  The observatory is a hemisphere of glass and starlight. At its center, Thessalon stands within a circle of power, arms raised, chanting words that make reality shiver. Before him, suspended in mid-air, floats the Tear of Luminous.
+
+  But it's not a gem. It's an eye—massive, lidless, filled with swirling darkness and distant stars. It stares at nothing and everything, and when your gaze meets it, you feel your sanity begin to fray.
+
+  Thessalon hasn't noticed you yet, consumed by his ritual. The eye pulses in time with his chanting. You can see cracks forming in its surface—whatever is imprisoned within is about to break free.
+
+  ~ observatory_reached = true
+  ~ ritual_witnessed = true
+
+  * [Attack Thessalon immediately, disrupting the ritual]
+    ~ combat_initiated = true
+    -> attack_thessalon
+
+  * [Try to steal the Tear/Eye while he's distracted]
+    ~ stealth += 3
+    -> steal_tear_attempt
+
+  * [Destroy the Tear/Eye, ending the threat permanently]
+    ~ tear_destroyed_attempt = true
+    -> destroy_tear
+
+  * [Call out to Thessalon, trying to reason with him]
+    ~ diplomacy_attempt = true
+    -> reason_with_thessalon
+
+  === reason_with_thessalon
+
+  "Thessalon!" you shout over the chanting. "Stop! You don't understand what you're unleashing!"
+
+  The Archmage's head snaps toward you, his chanting faltering. His eyes—Velara was right—are pools of absolute darkness, reflecting the void within the Eye. For a moment, recognition flickers across his face.
+
+  "You..." he whispers. "You're from the family. They sent you." His laugh is bitter. "Do you know what they did? What they imprisoned in this 'heirloom' of theirs?"
+
+  The Eye pulses, and Thessalon's expression twists with pain—or ecstasy, you can't tell which.
+
+  "It was my daughter," he says. "Three hundred years ago, your ancestors imprisoned my daughter's soul to power their estate's wards. When I discovered the truth, they'd already forgotten what the Tear truly was. Forgotten that they'd stolen someone's life to fuel their comfort."
+
+  The revelation stuns you. If he's telling the truth...
+
+  * [Help him complete the ritual and free his daughter]
+    ~ helped_thessalon = true
+    ~ family_betrayed = true
+    -> help_ritual
+
+  * [Stop him—you can't trust that what's in the Eye is still his daughter]
+    ~ opposed_thessalon = true
+    -> oppose_ritual
+
+  * [Ask for proof—you need to know the truth before deciding]
+    ~ truth_seeking = true
+    -> demand_proof
+
+  === help_ritual
+
+  "Tell me what to do," you say, stepping into the circle. "If what you say is true, then my family's debt is older and darker than I knew."
+
+  Thessalon's expression shifts from suspicion to desperate hope. "Stand opposite me. When I reach the final phrase, channel your will into breaking the seal. The Eye will resist—it's been a prison for so long, it's forgotten how to be anything else."
+
+  You take your position. The ritual resumes, and this time you add your voice to his. The Eye cracks further, light bleeding through—not the light of stars, but something warmer. More human.
+
+  The seal shatters.
+
+  What emerges is not a monster, but a woman—translucent, confused, her form flickering between substance and spirit. She looks at Thessalon with ancient recognition.
+
+  "Father?" she whispers. "How long has it been?"
+
+  "Too long, Lira," Thessalon says, tears streaming down his face. "Far too long."
+
+  He turns to you, and in his eyes you see the darkness receding. "Thank you. You could have killed us both, but you chose mercy. What will you tell your family?"
+
+  * [Tell them the truth—let them face their ancestors' crime]
+    ~ ending = "truth_teller"
+    -> ending_truth
+
+  * [Lie and say Thessalon destroyed the Tear]
+    ~ ending = "merciful_liar"
+    -> ending_lie
+
+  * [Demand payment for your help—you came here for compensation]
+    ~ ending = "mercenary_helper"
+    -> ending_payment
+
+  === oppose_ritual
+
+  "I can't let you do this!" you shout, diving forward to disrupt the ritual circle. Whether Thessalon speaks truth or lies, releasing something imprisoned for three centuries is too dangerous a gamble.
+
+  Thessalon roars in fury, and magical force slams into you like a hammer. You crash against the observatory wall, ribs cracking. But the circle is broken, the ritual disrupted.
+
+  The Eye shrieks—an impossible sound that shouldn't come from an object. It begins to collapse inward, imploding under its own power.
+
+  "No!" Thessalon screams. "Lira! I'm so sorry, I'm so sorry—"
+
+  The Eye vanishes with a sound like breaking glass. Thessalon collapses, sobbing. When he looks up at you, his eyes are normal again—human, brown, filled with absolute grief.
+
+  "She's gone," he whispers. "Three hundred years I searched, and you destroyed her in a moment."
+
+  * [Try to explain that you thought it was a monster]
+    -> ending_regret
+
+  * [Stand your ground—you made the right choice given what you knew]
+    -> ending_pragmatic
+
+  * [Offer him mercy or a quick death]
+    -> ending_merciful_end
+
+  === destroy_tear
+
+  You don't waste time with words or hesitation. Drawing on every scrap of magical power you possess, you unleash a blast of pure force at the Eye.
+
+  The Eye shatters.
+
+  What happens next happens fast: the observatory fills with blinding light and deafening sound. Thessalon screams—in rage or anguish, you can't tell. The tower itself shudders, wards collapsing, centuries of accumulated magic bleeding out into the night.
+
+  When the light fades, you're alone. Thessalon is gone—fled, dead, or transformed, you'll never know. The Eye's fragments litter the floor like teardrops made of night.
+
+  As you examine them, you hear a whisper—a woman's voice, fading into nothing:
+
+  "Thank you... for ending it..."
+
+  The fragments dissolve into mist.
+
+  ~ tear_destroyed = true
+  ~ thessalon_fate_unknown = true
+
+  * [Take proof of the Tear's destruction back to your family]
+    -> ending_mission_complete
+
+  * [Leave everything and disappear—you want no part of this anymore]
+    -> ending_walk_away
+
+  === ending_truth
+
+  You return to your family with the truth. The revelation that the Tear of Luminous contained a imprisoned soul—and that your ancestors were responsible—tears the family apart. Some refuse to believe. Others demand you be punished for betraying the family contract.
+
+  But a few—the younger generation—stand with you. The family's fortune was built on suffering. It's time to make amends.
+
+  Years later, you stand before a memorial you helped erect: a simple stone marked with Lira's name, and an apology centuries overdue. Thessalon never returned to claim it, but sometimes you find fresh moonflowers placed at its base.
+
+  You sleep better now than you have in years.
+
+  ENDING: The Truth Shall Make You Free
+
+  -> END
+
+  === ending_lie
+
+  You return to your family and spin a tale: Thessalon destroyed the Tear in his mad ritual before you could stop him. The family is disappointed but pays your fee. You don't tell them what the Tear truly was.
+
+  Sometimes, late at night, you wonder if you made the right choice. The family still prospers on the foundation of old sins. But Lira is free, and Thessalon has his daughter back—ghostly and strange though she may be.
+
+  One evening, you find a letter on your doorstep. No signature, just two words in elegant script: "Thank you."
+
+  You burn it immediately, but you keep the memory.
+
+  ENDING: Merciful Deceiver
+
+  -> END
+
+  === ending_payment
+
+  "I came here to get paid," you say bluntly. "The truth doesn't change that. Your daughter is free, but I still did a job—just not the one I was hired for."
+
+  Thessalon studies you for a long moment, then laughs—a sound of genuine amusement. "You're honest, at least. I can respect that." He produces a bag of gems and rare magical components. "This should more than cover your fee. And you'll keep my secret?"
+
+  "The family never needs to know the Tear still exists," you agree. "As far as they're concerned, you destroyed it."
+
+  "Then we have an accord."
+
+  You leave the tower wealthier than you arrived, and with a strange new understanding: sometimes the monsters are those who hire you, not those you're sent to stop.
+
+  ENDING: Professional Standards
+
+  -> END
+
+  === ending_regret
+
+  "I thought—I believed you were unleashing something terrible," you say quietly. "If I had known..."
+
+  "But you didn't know," Thessalon says, his voice hollow. "You acted on fear and assumption. And now she's gone forever."
+
+  He stands slowly, looking older than his years. "I won't kill you. You were ignorant, not malicious. But leave. Leave and never return to this tower. And tell your family..." He pauses. "Tell them nothing. Let them wonder what happened to their stolen prize."
+
+  You leave with the weight of your mistake crushing your chest. For the rest of your life, you'll wonder if you destroyed a monster or murdered an innocent. You'll never know for certain.
+
+  ENDING: The Price of Ignorance
+
+  -> END
+
+  === ending_pragmatic
+
+  "I made the only choice I could," you say firmly. "You were an Archmage performing a dark ritual with a clearly cursed object. Whatever was in that Eye—daughter, demon, or something worse—keeping it imprisoned was the safest option."
+
+  Thessalon looks at you with empty eyes. "Safe. Yes. Always so concerned with safety, you people. Never with justice. Never with mercy." He waves a hand dismissively. "Go. Tell your family their precious Tear is destroyed. Collect your fee. Sleep soundly knowing you did the 'right thing.'"
+
+  His voice drips with bitterness, but he doesn't attack. You leave, and though you stand by your choice, the doubt never fully fades.
+
+  ENDING: Necessary Evil
+
+  -> END
+
+  === ending_merciful_end
+
+  You draw your blade. "I can give you mercy, if you want it. A quick death, no more suffering."
+
+  Thessalon looks up at you, and for a moment you think he'll accept. Then he laughs—a broken, terrible sound. "You've already killed her. Killing me would be redundant." He stands, power crackling around his hands. "But if you want to try, then try."
+
+  * [Fight him to the death]
+    -> ending_final_duel
+
+  * [Lower your weapon and leave]
+    -> ending_walk_away_mercy
+
+  === ending_final_duel
+
+  The battle is brief and brutal. Thessalon, grief-mad and channeling power with suicidal abandon, nearly obliterates you in the first exchange. But grief makes him reckless, and you're fighting for your life.
+
+  Your blade finds his heart.
+
+  As he dies, he whispers: "Lira... I'm coming..."
+
+  You leave the tower as it begins to collapse, the Archmage's death unraveling three centuries of magical infrastructure. Behind you, the Tower of Sorrows falls, and with it, all the secrets it contained.
+
+  Your family pays you. You never tell them what really happened. Some truths are too heavy to share.
+
+  ENDING: Pyrrhic Victory
+
+  -> END
+
+  === ending_walk_away_mercy
+
+  You lower your weapon. "I won't kill you. You've suffered enough."
+
+  Thessalon says nothing, just turns away. You leave him there, a broken man in a tower of broken dreams.
+
+  You never learn what became of him. The Tower of Sorrows stands for another year, then one day it's simply... gone. No explosion, no collapse. Just empty land where the tower once stood.
+
+  You tell yourself he found peace somehow. You want to believe that.
+
+  ENDING: Uncertain Mercy
+
+  -> END
+
+  === ending_mission_complete
+
+  You return to your family with fragments of the Eye as proof of its destruction. They're satisfied—the curse is broken, the heirloom reclaimed (or destroyed, which amounts to the same thing). You're paid handsomely.
+
+  But sometimes, in dreams, you hear a woman's voice thanking you. You never know if you freed her or destroyed her. Perhaps it was both.
+
+  You use your payment to start a new life far from your family. Some legacies are too dark to inherit.
+
+  ENDING: Mission Accomplished
+
+  -> END
+
+  === ending_walk_away
+
+  You leave the fragments where they lie and walk out of the Tower of Sorrows. You keep walking—out of the city, out of the province, away from your family and their cursed heirlooms and their blood-soaked legacy.
+
+  Somewhere in the wilderness, you stop and look back. The tower stands silent against the dawn sky. You'll never know the full truth of what happened there, and you've decided you don't want to.
+
+  Some mysteries are better left unsolved. Some families are better left behind.
+
+  ENDING: The Wanderer
+
+  -> END
+
+  === intro_fallback
+
+  You retreat into the shadows, reconsidering your approach. The tower looms before you, full of secrets and danger. Time to try another way.
+
+  * [Circle to the eastern wall] { inventory.climbing_gear }
+    -> eastern_wall_climb
+
+  * [Investigate the servants' entrance]
+    -> servants_entrance
+
+  * [Try the sewer entrance] { !squeamish }
+    -> sewer_entrance

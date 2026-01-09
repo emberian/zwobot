@@ -1,0 +1,24 @@
+[package]
+name = "zwobot"
+description = "Zulip debate bot using Tulip framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zwobot"
+path = "src/main.rs"
+
+[dependencies]
+tulip-bot.workspace = true
+llm.workspace = true
+debate.workspace = true
+spweencraft = { path = "../spweencraft" }
+rhai-games = { path = "../rhai-games" }
+
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+toml.workspace = true
+serde.workspace = true
+anyhow.workspace = true
