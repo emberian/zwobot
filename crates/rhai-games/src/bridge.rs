@@ -3,21 +3,30 @@
 //! Rhai is synchronous, but LLM inference, HTTP, and file I/O are async.
 //! This bridge allows scripts to make blocking calls that are processed
 //! asynchronously by the tokio runtime.
+//!
+//! Requests are processed concurrently - a slow image generation won't block
+//! LLM requests from other scripts.
 
 use rhai::Dynamic;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, info};
 
 use crate::persistence::PersistenceManager;
 
 /// HTTP request timeout
-const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Maximum HTTP response body size (1MB)
 const HTTP_MAX_BODY_SIZE: usize = 1_000_000;
+
+/// Type alias for the LLM engine cache
+type LlmCache = Arc<RwLock<HashMap<String, Arc<llm::LlmEngine>>>>;
+
+/// Type alias for the image engine cache
+type ImageCache = Arc<RwLock<HashMap<String, Arc<llm::ImageEngine>>>>;
 
 /// Configuration for LLM inference
 #[derive(Clone, Debug)]
@@ -132,11 +141,14 @@ pub enum AsyncRequest {
     },
 }
 
-/// Bridge between sync Rhai execution and async bot operations
+/// Bridge between sync Rhai execution and async bot operations.
+///
+/// All requests are processed concurrently - spawned as separate tasks.
+/// This means a slow FLUX image generation won't block LLM requests.
 pub struct AsyncBridge {
     rx: mpsc::Receiver<AsyncRequest>,
-    llm_cache: HashMap<String, Arc<llm::LlmEngine>>,
-    image_cache: HashMap<String, Arc<llm::ImageEngine>>,
+    llm_cache: LlmCache,
+    image_cache: ImageCache,
     http_client: reqwest::Client,
     persistence: Arc<PersistenceManager>,
 }
@@ -144,7 +156,7 @@ pub struct AsyncBridge {
 impl AsyncBridge {
     /// Create a new async bridge and return the sender for making requests
     pub fn new(persistence: Arc<PersistenceManager>) -> (Self, mpsc::Sender<AsyncRequest>) {
-        let (tx, rx) = mpsc::channel(32);
+        let (tx, rx) = mpsc::channel(64);
         let http_client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
@@ -153,8 +165,8 @@ impl AsyncBridge {
         (
             Self {
                 rx,
-                llm_cache: HashMap::new(),
-                image_cache: HashMap::new(),
+                llm_cache: Arc::new(RwLock::new(HashMap::new())),
+                image_cache: Arc::new(RwLock::new(HashMap::new())),
                 http_client,
                 persistence,
             },
@@ -162,123 +174,121 @@ impl AsyncBridge {
         )
     }
 
-    /// Run the bridge, processing async requests
+    /// Run the bridge, processing async requests concurrently
     pub async fn run(mut self) {
-        info!("AsyncBridge started");
+        info!("AsyncBridge started (concurrent mode)");
+
         while let Some(request) = self.rx.recv().await {
             match request {
-                // LLM requests
-                AsyncRequest::GenerateLlm {
-                    config,
-                    prompt,
-                    response,
-                } => {
-                    let result = self.handle_llm_generate(config, prompt).await;
-                    let _ = response.send(result);
+                // LLM requests - spawn as concurrent tasks
+                AsyncRequest::GenerateLlm { config, prompt, response } => {
+                    let cache = self.llm_cache.clone();
+                    tokio::spawn(async move {
+                        let result = handle_llm_request(cache, config, prompt, false).await;
+                        let _ = response.send(result);
+                    });
                 }
-                AsyncRequest::CompleteLlm {
-                    config,
-                    prompt,
-                    response,
-                } => {
-                    let result = self.handle_llm_complete(config, prompt).await;
-                    let _ = response.send(result);
+                AsyncRequest::CompleteLlm { config, prompt, response } => {
+                    let cache = self.llm_cache.clone();
+                    tokio::spawn(async move {
+                        let result = handle_llm_request(cache, config, prompt, true).await;
+                        let _ = response.send(result);
+                    });
                 }
 
-                // Image generation
-                AsyncRequest::GenerateImage {
-                    config,
-                    prompt,
-                    response,
-                } => {
-                    let result = self.handle_image_generate(config, prompt).await;
-                    let _ = response.send(result);
+                // Image generation - spawn as concurrent task
+                AsyncRequest::GenerateImage { config, prompt, response } => {
+                    let cache = self.image_cache.clone();
+                    tokio::spawn(async move {
+                        let result = handle_image_request(cache, config, prompt).await;
+                        let _ = response.send(result);
+                    });
                 }
 
-                // HTTP requests
-                AsyncRequest::HttpGet {
-                    url,
-                    headers,
-                    response,
-                } => {
-                    let result = self.handle_http_get(url, headers).await;
-                    let _ = response.send(result);
+                // HTTP requests - spawn as concurrent tasks
+                AsyncRequest::HttpGet { url, headers, response } => {
+                    let client = self.http_client.clone();
+                    tokio::spawn(async move {
+                        let result = handle_http_get(client, url, headers).await;
+                        let _ = response.send(result);
+                    });
                 }
-                AsyncRequest::HttpPost {
-                    url,
-                    headers,
-                    body,
-                    content_type,
-                    response,
-                } => {
-                    let result = self.handle_http_post(url, headers, body, content_type).await;
-                    let _ = response.send(result);
+                AsyncRequest::HttpPost { url, headers, body, content_type, response } => {
+                    let client = self.http_client.clone();
+                    tokio::spawn(async move {
+                        let result = handle_http_post(client, url, headers, body, content_type).await;
+                        let _ = response.send(result);
+                    });
                 }
 
-                // Persistence requests
-                AsyncRequest::PersistSave {
-                    namespace,
-                    key,
-                    value,
-                    response,
-                } => {
-                    let result = self.persistence.save(&namespace, &key, value).await;
-                    let _ = response.send(result);
+                // Persistence requests - spawn as concurrent tasks
+                AsyncRequest::PersistSave { namespace, key, value, response } => {
+                    let persistence = self.persistence.clone();
+                    tokio::spawn(async move {
+                        let result = persistence.save(&namespace, &key, value).await;
+                        let _ = response.send(result);
+                    });
                 }
-                AsyncRequest::PersistLoad {
-                    namespace,
-                    key,
-                    response,
-                } => {
-                    let result = self.persistence.load(&namespace, &key).await;
-                    let _ = response.send(result);
+                AsyncRequest::PersistLoad { namespace, key, response } => {
+                    let persistence = self.persistence.clone();
+                    tokio::spawn(async move {
+                        let result = persistence.load(&namespace, &key).await;
+                        let _ = response.send(result);
+                    });
                 }
-                AsyncRequest::PersistList {
-                    namespace,
-                    response,
-                } => {
-                    let result = self.persistence.list(&namespace).await;
-                    let _ = response.send(result);
+                AsyncRequest::PersistList { namespace, response } => {
+                    let persistence = self.persistence.clone();
+                    tokio::spawn(async move {
+                        let result = persistence.list(&namespace).await;
+                        let _ = response.send(result);
+                    });
                 }
-                AsyncRequest::PersistDelete {
-                    namespace,
-                    key,
-                    response,
-                } => {
-                    let result = self.persistence.delete(&namespace, &key).await;
-                    let _ = response.send(result);
+                AsyncRequest::PersistDelete { namespace, key, response } => {
+                    let persistence = self.persistence.clone();
+                    tokio::spawn(async move {
+                        let result = persistence.delete(&namespace, &key).await;
+                        let _ = response.send(result);
+                    });
                 }
-                AsyncRequest::PersistExists {
-                    namespace,
-                    key,
-                    response,
-                } => {
-                    let exists = self.persistence.exists(&namespace, &key).await;
-                    let _ = response.send(exists);
+                AsyncRequest::PersistExists { namespace, key, response } => {
+                    let persistence = self.persistence.clone();
+                    tokio::spawn(async move {
+                        let exists = persistence.exists(&namespace, &key).await;
+                        let _ = response.send(exists);
+                    });
                 }
             }
         }
         info!("AsyncBridge stopped");
     }
+}
 
-    // ---- LLM handlers ----
+// ---- Standalone async handlers ----
 
-    async fn handle_llm_generate(
-        &mut self,
-        config: LlmConfig,
-        prompt: String,
-    ) -> Result<String, String> {
-        let cache_key = format!("{}:{}", config.model_id, config.quantization);
+/// Handle LLM generate/complete requests with shared cache
+async fn handle_llm_request(
+    cache: LlmCache,
+    config: LlmConfig,
+    prompt: String,
+    raw_complete: bool,
+) -> Result<String, String> {
+    let cache_key = format!("{}:{}", config.model_id, config.quantization);
 
-        let engine = if let Some(engine) = self.llm_cache.get(&cache_key) {
-            engine.clone()
-        } else {
+    // Try to get existing engine from cache
+    let engine = {
+        let cache_read = cache.read().await;
+        cache_read.get(&cache_key).cloned()
+    };
+
+    let engine = match engine {
+        Some(e) => e,
+        None => {
             info!(
                 "Loading LLM model {} ({})",
                 config.model_id, config.quantization
             );
 
-            let engine = llm::LlmEngine::new(
+            let new_engine = llm::LlmEngine::new(
                 &config.model_id,
                 &config.quantization,
                 config.max_tokens,
@@ -287,64 +297,45 @@ impl AsyncBridge {
             .await
             .map_err(|e| e.to_string())?;
 
-            let engine = Arc::new(engine);
-            self.llm_cache.insert(cache_key, engine.clone());
-            engine
-        };
+            let new_engine = Arc::new(new_engine);
 
+            // Insert into cache
+            let mut cache_write = cache.write().await;
+            cache_write.insert(cache_key.clone(), new_engine.clone());
+            new_engine
+        }
+    };
+
+    if raw_complete {
+        engine.complete(&prompt).await.map_err(|e| e.to_string())
+    } else {
         engine.generate(&prompt).await.map_err(|e| e.to_string())
     }
+}
 
-    async fn handle_llm_complete(
-        &mut self,
-        config: LlmConfig,
-        prompt: String,
-    ) -> Result<String, String> {
-        let cache_key = format!("{}:{}", config.model_id, config.quantization);
+/// Handle image generation requests with shared cache
+async fn handle_image_request(
+    cache: ImageCache,
+    config: ImageConfig,
+    prompt: String,
+) -> Result<String, String> {
+    let cache_key = format!("{}:{}x{}", config.model_id, config.width, config.height);
 
-        let engine = if let Some(engine) = self.llm_cache.get(&cache_key) {
-            engine.clone()
-        } else {
-            info!(
-                "Loading LLM model {} ({})",
-                config.model_id, config.quantization
-            );
+    // Try to get existing engine from cache
+    let engine = {
+        let cache_read = cache.read().await;
+        cache_read.get(&cache_key).cloned()
+    };
 
-            let engine = llm::LlmEngine::new(
-                &config.model_id,
-                &config.quantization,
-                config.max_tokens,
-                config.temperature,
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-
-            let engine = Arc::new(engine);
-            self.llm_cache.insert(cache_key, engine.clone());
-            engine
-        };
-
-        engine.complete(&prompt).await.map_err(|e| e.to_string())
-    }
-
-    // ---- Image generation handler ----
-
-    async fn handle_image_generate(
-        &mut self,
-        config: ImageConfig,
-        prompt: String,
-    ) -> Result<String, String> {
-        let cache_key = format!("{}:{}x{}", config.model_id, config.width, config.height);
-
-        let engine = if let Some(engine) = self.image_cache.get(&cache_key) {
-            engine.clone()
-        } else {
+    let engine = match engine {
+        Some(e) => e,
+        None => {
             info!(
                 "Loading image model {} ({}x{}, offloaded: {})",
                 config.model_id, config.width, config.height, config.offloaded
             );
 
-            let engine = llm::ImageEngine::new(
+            let new_engine = llm::ImageEngine::new(
                 &config.model_id,
                 config.offloaded,
                 config.width,
@@ -353,84 +344,86 @@ impl AsyncBridge {
             .await
             .map_err(|e| e.to_string())?;
 
-            let engine = Arc::new(engine);
-            self.image_cache.insert(cache_key, engine.clone());
-            engine
-        };
+            let new_engine = Arc::new(new_engine);
 
-        engine.generate(&prompt).await.map_err(|e| e.to_string())
+            // Insert into cache
+            let mut cache_write = cache.write().await;
+            cache_write.insert(cache_key.clone(), new_engine.clone());
+            new_engine
+        }
+    };
+
+    engine.generate(&prompt).await.map_err(|e| e.to_string())
+}
+
+/// Handle HTTP GET requests
+async fn handle_http_get(
+    client: reqwest::Client,
+    url: String,
+    headers: HashMap<String, String>,
+) -> Result<String, String> {
+    debug!("HTTP GET: {}", url);
+
+    let mut request = client.get(&url);
+    for (k, v) in headers {
+        request = request.header(&k, &v);
     }
 
-    // ---- HTTP handlers ----
+    let response = request.send().await.map_err(|e| e.to_string())?;
 
-    async fn handle_http_get(
-        &self,
-        url: String,
-        headers: HashMap<String, String>,
-    ) -> Result<String, String> {
-        debug!("HTTP GET: {}", url);
-
-        let mut request = self.http_client.get(&url);
-        for (k, v) in headers {
-            request = request.header(&k, &v);
-        }
-
-        let response = request.send().await.map_err(|e| e.to_string())?;
-
-        if !response.status().is_success() {
-            return Err(format!("HTTP {}", response.status()));
-        }
-
-        let body = response.text().await.map_err(|e| e.to_string())?;
-
-        if body.len() > HTTP_MAX_BODY_SIZE {
-            return Err(format!(
-                "HTTP response too large: {} bytes (max: {})",
-                body.len(),
-                HTTP_MAX_BODY_SIZE
-            ));
-        }
-
-        Ok(body)
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
     }
 
-    async fn handle_http_post(
-        &self,
-        url: String,
-        headers: HashMap<String, String>,
-        body: String,
-        content_type: String,
-    ) -> Result<String, String> {
-        debug!("HTTP POST: {}", url);
+    let body = response.text().await.map_err(|e| e.to_string())?;
 
-        let mut request = self
-            .http_client
-            .post(&url)
-            .header("Content-Type", content_type)
-            .body(body);
-
-        for (k, v) in headers {
-            request = request.header(&k, &v);
-        }
-
-        let response = request.send().await.map_err(|e| e.to_string())?;
-
-        if !response.status().is_success() {
-            return Err(format!("HTTP {}", response.status()));
-        }
-
-        let body = response.text().await.map_err(|e| e.to_string())?;
-
-        if body.len() > HTTP_MAX_BODY_SIZE {
-            return Err(format!(
-                "HTTP response too large: {} bytes (max: {})",
-                body.len(),
-                HTTP_MAX_BODY_SIZE
-            ));
-        }
-
-        Ok(body)
+    if body.len() > HTTP_MAX_BODY_SIZE {
+        return Err(format!(
+            "HTTP response too large: {} bytes (max: {})",
+            body.len(),
+            HTTP_MAX_BODY_SIZE
+        ));
     }
+
+    Ok(body)
+}
+
+/// Handle HTTP POST requests
+async fn handle_http_post(
+    client: reqwest::Client,
+    url: String,
+    headers: HashMap<String, String>,
+    body: String,
+    content_type: String,
+) -> Result<String, String> {
+    debug!("HTTP POST: {}", url);
+
+    let mut request = client
+        .post(&url)
+        .header("Content-Type", content_type)
+        .body(body);
+
+    for (k, v) in headers {
+        request = request.header(&k, &v);
+    }
+
+    let response = request.send().await.map_err(|e| e.to_string())?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+
+    let body = response.text().await.map_err(|e| e.to_string())?;
+
+    if body.len() > HTTP_MAX_BODY_SIZE {
+        return Err(format!(
+            "HTTP response too large: {} bytes (max: {})",
+            body.len(),
+            HTTP_MAX_BODY_SIZE
+        ));
+    }
+
+    Ok(body)
 }
 
 // ---- Blocking wrappers for sync Rhai context ----
