@@ -81,7 +81,8 @@ impl PersistenceManager {
     pub async fn list(&self, namespace: &str) -> Result<Vec<String>, String> {
         let dir = self.base_dir.join(namespace);
 
-        if !dir.exists() {
+        // Use async metadata check instead of blocking exists()
+        if fs::metadata(&dir).await.is_err() {
             return Ok(Vec::new());
         }
 
@@ -112,21 +113,19 @@ impl PersistenceManager {
     pub async fn delete(&self, namespace: &str, key: &str) -> Result<bool, String> {
         let path = self.file_path(namespace, key);
 
-        if !path.exists() {
-            return Ok(false);
+        match fs::remove_file(&path).await {
+            Ok(()) => {
+                debug!("Deleted {}/{}", namespace, key);
+                Ok(true)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("Failed to delete file: {}", e)),
         }
-
-        fs::remove_file(&path)
-            .await
-            .map_err(|e| format!("Failed to delete file: {}", e))?;
-
-        debug!("Deleted {}/{}", namespace, key);
-        Ok(true)
     }
 
     /// Check if a key exists in a namespace
     pub async fn exists(&self, namespace: &str, key: &str) -> bool {
-        self.file_path(namespace, key).exists()
+        fs::metadata(self.file_path(namespace, key)).await.is_ok()
     }
 
     /// Get the base directory

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::persistence::PersistenceManager;
 
@@ -39,6 +39,26 @@ impl Default for LlmConfig {
     }
 }
 
+/// Configuration for image generation
+#[derive(Clone, Debug)]
+pub struct ImageConfig {
+    pub model_id: String,
+    pub offloaded: bool,
+    pub width: usize,
+    pub height: usize,
+}
+
+impl Default for ImageConfig {
+    fn default() -> Self {
+        Self {
+            model_id: "black-forest-labs/FLUX.1-schnell".to_string(),
+            offloaded: true,
+            width: 512,
+            height: 512,
+        }
+    }
+}
+
 /// Requests that need async execution
 pub enum AsyncRequest {
     // ---- LLM ----
@@ -51,6 +71,14 @@ pub enum AsyncRequest {
     /// Complete text using LLM (raw completion, no template)
     CompleteLlm {
         config: LlmConfig,
+        prompt: String,
+        response: oneshot::Sender<Result<String, String>>,
+    },
+
+    // ---- Image Generation ----
+    /// Generate an image from a text prompt
+    GenerateImage {
+        config: ImageConfig,
         prompt: String,
         response: oneshot::Sender<Result<String, String>>,
     },
@@ -108,6 +136,7 @@ pub enum AsyncRequest {
 pub struct AsyncBridge {
     rx: mpsc::Receiver<AsyncRequest>,
     llm_cache: HashMap<String, Arc<llm::LlmEngine>>,
+    image_cache: HashMap<String, Arc<llm::ImageEngine>>,
     http_client: reqwest::Client,
     persistence: Arc<PersistenceManager>,
 }
@@ -125,6 +154,7 @@ impl AsyncBridge {
             Self {
                 rx,
                 llm_cache: HashMap::new(),
+                image_cache: HashMap::new(),
                 http_client,
                 persistence,
             },
@@ -152,6 +182,16 @@ impl AsyncBridge {
                     response,
                 } => {
                     let result = self.handle_llm_complete(config, prompt).await;
+                    let _ = response.send(result);
+                }
+
+                // Image generation
+                AsyncRequest::GenerateImage {
+                    config,
+                    prompt,
+                    response,
+                } => {
+                    let result = self.handle_image_generate(config, prompt).await;
                     let _ = response.send(result);
                 }
 
@@ -287,6 +327,40 @@ impl AsyncBridge {
         engine.complete(&prompt).await.map_err(|e| e.to_string())
     }
 
+    // ---- Image generation handler ----
+
+    async fn handle_image_generate(
+        &mut self,
+        config: ImageConfig,
+        prompt: String,
+    ) -> Result<String, String> {
+        let cache_key = format!("{}:{}x{}", config.model_id, config.width, config.height);
+
+        let engine = if let Some(engine) = self.image_cache.get(&cache_key) {
+            engine.clone()
+        } else {
+            info!(
+                "Loading image model {} ({}x{}, offloaded: {})",
+                config.model_id, config.width, config.height, config.offloaded
+            );
+
+            let engine = llm::ImageEngine::new(
+                &config.model_id,
+                config.offloaded,
+                config.width,
+                config.height,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+            let engine = Arc::new(engine);
+            self.image_cache.insert(cache_key, engine.clone());
+            engine
+        };
+
+        engine.generate(&prompt).await.map_err(|e| e.to_string())
+    }
+
     // ---- HTTP handlers ----
 
     async fn handle_http_get(
@@ -310,8 +384,11 @@ impl AsyncBridge {
         let body = response.text().await.map_err(|e| e.to_string())?;
 
         if body.len() > HTTP_MAX_BODY_SIZE {
-            warn!("HTTP response truncated from {} bytes", body.len());
-            return Ok(body[..HTTP_MAX_BODY_SIZE].to_string());
+            return Err(format!(
+                "HTTP response too large: {} bytes (max: {})",
+                body.len(),
+                HTTP_MAX_BODY_SIZE
+            ));
         }
 
         Ok(body)
@@ -345,8 +422,11 @@ impl AsyncBridge {
         let body = response.text().await.map_err(|e| e.to_string())?;
 
         if body.len() > HTTP_MAX_BODY_SIZE {
-            warn!("HTTP response truncated from {} bytes", body.len());
-            return Ok(body[..HTTP_MAX_BODY_SIZE].to_string());
+            return Err(format!(
+                "HTTP response too large: {} bytes (max: {})",
+                body.len(),
+                HTTP_MAX_BODY_SIZE
+            ));
         }
 
         Ok(body)
@@ -355,170 +435,61 @@ impl AsyncBridge {
 
 // ---- Blocking wrappers for sync Rhai context ----
 
-/// Make a blocking LLM generate call
-pub fn blocking_llm_generate(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    config: LlmConfig,
-    prompt: String,
-) -> Result<String, String> {
-    let (tx, rx) = oneshot::channel();
-    bridge_tx
-        .blocking_send(AsyncRequest::GenerateLlm {
-            config,
-            prompt,
-            response: tx,
-        })
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.blocking_recv()
-        .map_err(|e| format!("Failed to receive response: {}", e))?
+/// Macro to generate blocking wrapper functions for AsyncRequest variants.
+/// Reduces boilerplate by handling the channel setup and error handling uniformly.
+macro_rules! blocking_request {
+    // For Result<T, String> return types
+    ($fn_name:ident, $variant:ident { $($field:ident : $ty:ty),* $(,)? } -> $ret:ty) => {
+        pub fn $fn_name(
+            bridge_tx: &mpsc::Sender<AsyncRequest>,
+            $($field: $ty),*
+        ) -> Result<$ret, String> {
+            let (tx, rx) = oneshot::channel();
+            bridge_tx
+                .blocking_send(AsyncRequest::$variant {
+                    $($field,)*
+                    response: tx,
+                })
+                .map_err(|e| format!("Failed to send request: {}", e))?;
+            rx.blocking_recv()
+                .map_err(|e| format!("Failed to receive response: {}", e))?
+        }
+    };
+    // For direct return types (unwraps the Result)
+    ($fn_name:ident, $variant:ident { $($field:ident : $ty:ty),* $(,)? } => $ret:ty, $default:expr) => {
+        pub fn $fn_name(
+            bridge_tx: &mpsc::Sender<AsyncRequest>,
+            $($field: $ty),*
+        ) -> $ret {
+            let (tx, rx) = oneshot::channel();
+            if bridge_tx
+                .blocking_send(AsyncRequest::$variant {
+                    $($field,)*
+                    response: tx,
+                })
+                .is_err()
+            {
+                return $default;
+            }
+            rx.blocking_recv().unwrap_or($default)
+        }
+    };
 }
 
-/// Make a blocking LLM complete call
-pub fn blocking_llm_complete(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    config: LlmConfig,
-    prompt: String,
-) -> Result<String, String> {
-    let (tx, rx) = oneshot::channel();
-    bridge_tx
-        .blocking_send(AsyncRequest::CompleteLlm {
-            config,
-            prompt,
-            response: tx,
-        })
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.blocking_recv()
-        .map_err(|e| format!("Failed to receive response: {}", e))?
-}
+// LLM operations
+blocking_request!(blocking_llm_generate, GenerateLlm { config: LlmConfig, prompt: String } -> String);
+blocking_request!(blocking_llm_complete, CompleteLlm { config: LlmConfig, prompt: String } -> String);
 
-/// Make a blocking HTTP GET call
-pub fn blocking_http_get(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    url: String,
-    headers: HashMap<String, String>,
-) -> Result<String, String> {
-    let (tx, rx) = oneshot::channel();
-    bridge_tx
-        .blocking_send(AsyncRequest::HttpGet {
-            url,
-            headers,
-            response: tx,
-        })
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.blocking_recv()
-        .map_err(|e| format!("Failed to receive response: {}", e))?
-}
+// Image generation
+blocking_request!(blocking_image_generate, GenerateImage { config: ImageConfig, prompt: String } -> String);
 
-/// Make a blocking HTTP POST call
-pub fn blocking_http_post(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    url: String,
-    headers: HashMap<String, String>,
-    body: String,
-    content_type: String,
-) -> Result<String, String> {
-    let (tx, rx) = oneshot::channel();
-    bridge_tx
-        .blocking_send(AsyncRequest::HttpPost {
-            url,
-            headers,
-            body,
-            content_type,
-            response: tx,
-        })
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.blocking_recv()
-        .map_err(|e| format!("Failed to receive response: {}", e))?
-}
+// HTTP operations
+blocking_request!(blocking_http_get, HttpGet { url: String, headers: HashMap<String, String> } -> String);
+blocking_request!(blocking_http_post, HttpPost { url: String, headers: HashMap<String, String>, body: String, content_type: String } -> String);
 
-/// Make a blocking persistence save call
-pub fn blocking_persist_save(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    namespace: String,
-    key: String,
-    value: Dynamic,
-) -> Result<(), String> {
-    let (tx, rx) = oneshot::channel();
-    bridge_tx
-        .blocking_send(AsyncRequest::PersistSave {
-            namespace,
-            key,
-            value,
-            response: tx,
-        })
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.blocking_recv()
-        .map_err(|e| format!("Failed to receive response: {}", e))?
-}
-
-/// Make a blocking persistence load call
-pub fn blocking_persist_load(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    namespace: String,
-    key: String,
-) -> Result<Dynamic, String> {
-    let (tx, rx) = oneshot::channel();
-    bridge_tx
-        .blocking_send(AsyncRequest::PersistLoad {
-            namespace,
-            key,
-            response: tx,
-        })
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.blocking_recv()
-        .map_err(|e| format!("Failed to receive response: {}", e))?
-}
-
-/// Make a blocking persistence list call
-pub fn blocking_persist_list(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    namespace: String,
-) -> Result<Vec<String>, String> {
-    let (tx, rx) = oneshot::channel();
-    bridge_tx
-        .blocking_send(AsyncRequest::PersistList {
-            namespace,
-            response: tx,
-        })
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.blocking_recv()
-        .map_err(|e| format!("Failed to receive response: {}", e))?
-}
-
-/// Make a blocking persistence delete call
-pub fn blocking_persist_delete(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    namespace: String,
-    key: String,
-) -> Result<bool, String> {
-    let (tx, rx) = oneshot::channel();
-    bridge_tx
-        .blocking_send(AsyncRequest::PersistDelete {
-            namespace,
-            key,
-            response: tx,
-        })
-        .map_err(|e| format!("Failed to send request: {}", e))?;
-    rx.blocking_recv()
-        .map_err(|e| format!("Failed to receive response: {}", e))?
-}
-
-/// Make a blocking persistence exists call
-pub fn blocking_persist_exists(
-    bridge_tx: &mpsc::Sender<AsyncRequest>,
-    namespace: String,
-    key: String,
-) -> bool {
-    let (tx, rx) = oneshot::channel();
-    if bridge_tx
-        .blocking_send(AsyncRequest::PersistExists {
-            namespace,
-            key,
-            response: tx,
-        })
-        .is_err()
-    {
-        return false;
-    }
-    rx.blocking_recv().unwrap_or(false)
-}
+// Persistence operations
+blocking_request!(blocking_persist_save, PersistSave { namespace: String, key: String, value: Dynamic } -> ());
+blocking_request!(blocking_persist_load, PersistLoad { namespace: String, key: String } -> Dynamic);
+blocking_request!(blocking_persist_list, PersistList { namespace: String } -> Vec<String>);
+blocking_request!(blocking_persist_delete, PersistDelete { namespace: String, key: String } -> bool);
+blocking_request!(blocking_persist_exists, PersistExists { namespace: String, key: String } => bool, false);

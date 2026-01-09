@@ -109,9 +109,10 @@ impl TimerManager {
         // Reschedule repeating timers
         for id in to_reschedule {
             if let Some(timer) = timers.get_mut(&id) {
-                let interval = timer.repeating.unwrap();
-                timer.fire_at = now + interval;
-                debug!("Rescheduled repeating timer {} for {:?}", id, interval);
+                if let Some(interval) = timer.repeating {
+                    timer.fire_at = now + interval;
+                    debug!("Rescheduled repeating timer {} for {:?}", id, interval);
+                }
             }
         }
 

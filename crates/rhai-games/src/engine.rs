@@ -10,8 +10,9 @@ use tracing::{info, error, debug};
 
 use crate::api::{ExecutionContext, ScriptResponse, ResponseBuilder, EmbedData};
 use crate::bridge::{
-    AsyncRequest, LlmConfig,
+    AsyncRequest, LlmConfig, ImageConfig,
     blocking_llm_complete, blocking_llm_generate,
+    blocking_image_generate,
     blocking_http_get, blocking_http_post,
     blocking_persist_save, blocking_persist_load, blocking_persist_list,
     blocking_persist_delete, blocking_persist_exists,
@@ -19,6 +20,22 @@ use crate::bridge::{
 use crate::session::GameSession;
 use crate::script::GameScript;
 use crate::{RhaiError, Result};
+
+/// Create a success result map: #{ ok: true, value: ... }
+fn ok_result(value: Dynamic) -> Map {
+    let mut map = Map::new();
+    map.insert("ok".into(), Dynamic::from(true));
+    map.insert("value".into(), value);
+    map
+}
+
+/// Create an error result map: #{ ok: false, error: "..." }
+fn err_result(error: impl Into<String>) -> Map {
+    let mut map = Map::new();
+    map.insert("ok".into(), Dynamic::from(false));
+    map.insert("error".into(), Dynamic::from(error.into()));
+    map
+}
 
 // Thread-local storage for execution context
 thread_local! {
@@ -28,6 +45,7 @@ thread_local! {
     static SESSION_PLAYERS: RefCell<Option<rhai::Array>> = RefCell::new(None);
     static SESSION_TURN: RefCell<i64> = RefCell::new(0);
     static LLM_CONFIG: RefCell<Option<LlmConfig>> = RefCell::new(None);
+    static IMAGE_CONFIG: RefCell<Option<ImageConfig>> = RefCell::new(None);
     static BRIDGE_TX: RefCell<Option<mpsc::Sender<AsyncRequest>>> = RefCell::new(None);
     static END_SESSION_FLAG: RefCell<bool> = RefCell::new(false);
     // New thread-locals for extended features
@@ -66,6 +84,7 @@ impl RhaiEngine {
         Self::register_persist_api(&mut engine);
         Self::register_shared_state_api(&mut engine);
         Self::register_timer_api(&mut engine);
+        Self::register_image_api(&mut engine);
 
         // Store bridge sender for LLM calls
         BRIDGE_TX.with(|b| {
@@ -115,6 +134,7 @@ impl RhaiEngine {
         EXEC_CONTEXT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
         RESPONSE_BUILDER.with(|r| *r.borrow_mut() = Some(ResponseBuilder::new()));
         LLM_CONFIG.with(|l| *l.borrow_mut() = script.meta.default_llm.clone());
+        IMAGE_CONFIG.with(|c| *c.borrow_mut() = script.meta.default_image.clone());
         BRIDGE_TX.with(|b| *b.borrow_mut() = Some(bridge_tx.clone()));
         END_SESSION_FLAG.with(|f| *f.borrow_mut() = false);
 
@@ -125,7 +145,7 @@ impl RhaiEngine {
         };
         CURRENT_NAMESPACE.with(|n| *n.borrow_mut() = namespace);
         CURRENT_TOPIC.with(|t| *t.borrow_mut() = Some(topic.to_string()));
-        CURRENT_SCRIPT_ID.with(|s| *s.borrow_mut() = Some(script.meta.title.clone()));
+        CURRENT_SCRIPT_ID.with(|s| *s.borrow_mut() = Some(script.id.clone()));
         SCHEDULED_TIMERS.with(|t| t.borrow_mut().clear());
         CANCELLED_TIMERS.with(|t| t.borrow_mut().clear());
 
@@ -443,140 +463,68 @@ impl RhaiEngine {
 
     /// Register LLM API functions
     fn register_llm_api(engine: &mut Engine) {
-        // llm_generate(prompt: &str) -> String
-        engine.register_fn("llm_generate", |prompt: &str| -> String {
-            let config = LLM_CONFIG.with(|l| l.borrow().clone());
-            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
-
-            match (config, bridge_tx) {
-                (Some(config), Some(tx)) => {
-                    match blocking_llm_generate(&tx, config, prompt.to_string()) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            error!("LLM generation failed: {}", e);
-                            format!("[LLM Error: {}]", e)
-                        }
-                    }
-                }
-                (None, _) => {
-                    error!("No LLM config set for script");
-                    "[Error: No LLM config]".to_string()
-                }
-                (_, None) => {
-                    error!("No bridge available for LLM");
-                    "[Error: No LLM bridge]".to_string()
-                }
-            }
-        });
-
-        // llm_generate(prompt: String) -> String (overload)
-        engine.register_fn("llm_generate", |prompt: String| -> String {
-            let config = LLM_CONFIG.with(|l| l.borrow().clone());
-            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
-
+        // Helper to perform LLM generation with config
+        fn do_llm_generate(config: Option<LlmConfig>, bridge_tx: Option<mpsc::Sender<AsyncRequest>>, prompt: String) -> Map {
             match (config, bridge_tx) {
                 (Some(config), Some(tx)) => {
                     match blocking_llm_generate(&tx, config, prompt) {
-                        Ok(result) => result,
+                        Ok(result) => ok_result(Dynamic::from(result)),
                         Err(e) => {
                             error!("LLM generation failed: {}", e);
-                            format!("[LLM Error: {}]", e)
-                        }
-                    }
-                }
-                (None, _) => "[Error: No LLM config]".to_string(),
-                (_, None) => "[Error: No LLM bridge]".to_string(),
-            }
-        });
-
-        // llm_generate_with(config: Map, prompt: &str) -> String
-        engine.register_fn("llm_generate_with", |config_map: Map, prompt: &str| -> String {
-            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
-
-            let config = LlmConfig {
-                model_id: config_map
-                    .get("model_id")
-                    .and_then(|v| v.clone().try_cast::<String>())
-                    .unwrap_or_default(),
-                quantization: config_map
-                    .get("quantization")
-                    .and_then(|v| v.clone().try_cast::<String>())
-                    .unwrap_or_else(|| "Q4_K_M".to_string()),
-                max_tokens: config_map
-                    .get("max_tokens")
-                    .and_then(|v| v.clone().try_cast::<i64>())
-                    .map(|v| v as u32)
-                    .unwrap_or(1024),
-                temperature: config_map
-                    .get("temperature")
-                    .and_then(|v| v.clone().try_cast::<f64>())
-                    .map(|v| v as f32)
-                    .unwrap_or(0.7),
-            };
-
-            if config.model_id.is_empty() {
-                return "[Error: No model_id in config]".to_string();
-            }
-
-            match bridge_tx {
-                Some(tx) => {
-                    match blocking_llm_generate(&tx, config, prompt.to_string()) {
-                        Ok(result) => result,
-                        Err(e) => format!("[LLM Error: {}]", e),
-                    }
-                }
-                None => "[Error: No LLM bridge]".to_string(),
-            }
-        });
-
-        // llm_complete(prompt: &str) -> String (raw completion, no chat template)
-        engine.register_fn("llm_complete", |prompt: &str| -> String {
-            let config = LLM_CONFIG.with(|l| l.borrow().clone());
-            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
-
-            match (config, bridge_tx) {
-                (Some(config), Some(tx)) => {
-                    match blocking_llm_complete(&tx, config, prompt.to_string()) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            error!("LLM completion failed: {}", e);
-                            format!("[LLM Error: {}]", e)
+                            err_result(e)
                         }
                     }
                 }
                 (None, _) => {
                     error!("No LLM config set for script");
-                    "[Error: No LLM config]".to_string()
+                    err_result("No LLM config - add @llm annotation to script header")
                 }
                 (_, None) => {
                     error!("No bridge available for LLM");
-                    "[Error: No LLM bridge]".to_string()
+                    err_result("No LLM bridge available")
                 }
             }
-        });
+        }
 
-        // llm_complete(prompt: String) -> String (overload)
-        engine.register_fn("llm_complete", |prompt: String| -> String {
-            let config = LLM_CONFIG.with(|l| l.borrow().clone());
-            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
-
+        // Helper to perform LLM completion with config
+        fn do_llm_complete(config: Option<LlmConfig>, bridge_tx: Option<mpsc::Sender<AsyncRequest>>, prompt: String) -> Map {
             match (config, bridge_tx) {
                 (Some(config), Some(tx)) => {
                     match blocking_llm_complete(&tx, config, prompt) {
-                        Ok(result) => result,
+                        Ok(result) => ok_result(Dynamic::from(result)),
                         Err(e) => {
                             error!("LLM completion failed: {}", e);
-                            format!("[LLM Error: {}]", e)
+                            err_result(e)
                         }
                     }
                 }
-                (None, _) => "[Error: No LLM config]".to_string(),
-                (_, None) => "[Error: No LLM bridge]".to_string(),
+                (None, _) => {
+                    error!("No LLM config set for script");
+                    err_result("No LLM config - add @llm annotation to script header")
+                }
+                (_, None) => {
+                    error!("No bridge available for LLM");
+                    err_result("No LLM bridge available")
+                }
             }
+        }
+
+        // llm_generate(prompt: &str) -> Map { ok: bool, value/error: String }
+        engine.register_fn("llm_generate", |prompt: &str| -> Map {
+            let config = LLM_CONFIG.with(|l| l.borrow().clone());
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+            do_llm_generate(config, bridge_tx, prompt.to_string())
         });
 
-        // llm_complete_with(config: Map, prompt: &str) -> String
-        engine.register_fn("llm_complete_with", |config_map: Map, prompt: &str| -> String {
+        // llm_generate(prompt: String) -> Map (overload)
+        engine.register_fn("llm_generate", |prompt: String| -> Map {
+            let config = LLM_CONFIG.with(|l| l.borrow().clone());
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+            do_llm_generate(config, bridge_tx, prompt)
+        });
+
+        // llm_generate_with(config: Map, prompt: &str) -> Map
+        engine.register_fn("llm_generate_with", |config_map: Map, prompt: &str| -> Map {
             let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
 
             let config = LlmConfig {
@@ -601,18 +549,56 @@ impl RhaiEngine {
             };
 
             if config.model_id.is_empty() {
-                return "[Error: No model_id in config]".to_string();
+                return err_result("No model_id in config");
             }
 
-            match bridge_tx {
-                Some(tx) => {
-                    match blocking_llm_complete(&tx, config, prompt.to_string()) {
-                        Ok(result) => result,
-                        Err(e) => format!("[LLM Error: {}]", e),
-                    }
-                }
-                None => "[Error: No LLM bridge]".to_string(),
+            do_llm_generate(Some(config), bridge_tx, prompt.to_string())
+        });
+
+        // llm_complete(prompt: &str) -> Map (raw completion, no chat template)
+        engine.register_fn("llm_complete", |prompt: &str| -> Map {
+            let config = LLM_CONFIG.with(|l| l.borrow().clone());
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+            do_llm_complete(config, bridge_tx, prompt.to_string())
+        });
+
+        // llm_complete(prompt: String) -> Map (overload)
+        engine.register_fn("llm_complete", |prompt: String| -> Map {
+            let config = LLM_CONFIG.with(|l| l.borrow().clone());
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+            do_llm_complete(config, bridge_tx, prompt)
+        });
+
+        // llm_complete_with(config: Map, prompt: &str) -> Map
+        engine.register_fn("llm_complete_with", |config_map: Map, prompt: &str| -> Map {
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+
+            let config = LlmConfig {
+                model_id: config_map
+                    .get("model_id")
+                    .and_then(|v| v.clone().try_cast::<String>())
+                    .unwrap_or_default(),
+                quantization: config_map
+                    .get("quantization")
+                    .and_then(|v| v.clone().try_cast::<String>())
+                    .unwrap_or_else(|| "Q4_K_M".to_string()),
+                max_tokens: config_map
+                    .get("max_tokens")
+                    .and_then(|v| v.clone().try_cast::<i64>())
+                    .map(|v| v as u32)
+                    .unwrap_or(1024),
+                temperature: config_map
+                    .get("temperature")
+                    .and_then(|v| v.clone().try_cast::<f64>())
+                    .map(|v| v as f32)
+                    .unwrap_or(0.7),
+            };
+
+            if config.model_id.is_empty() {
+                return err_result("No model_id in config");
             }
+
+            do_llm_complete(Some(config), bridge_tx, prompt.to_string())
         });
     }
 
@@ -642,36 +628,46 @@ impl RhaiEngine {
 
     /// Register HTTP API functions
     fn register_http_api(engine: &mut Engine) {
-        // http_get(url: &str) -> String
-        engine.register_fn("http_get", |url: &str| -> String {
-            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+        // Helper for HTTP GET
+        fn do_http_get(bridge_tx: Option<mpsc::Sender<AsyncRequest>>, url: String, headers: HashMap<String, String>) -> Map {
             match bridge_tx {
                 Some(tx) => {
-                    match blocking_http_get(&tx, url.to_string(), HashMap::new()) {
-                        Ok(body) => body,
-                        Err(e) => format!("[HTTP Error: {}]", e),
+                    match blocking_http_get(&tx, url, headers) {
+                        Ok(body) => ok_result(Dynamic::from(body)),
+                        Err(e) => err_result(e),
                     }
                 }
-                None => "[Error: No bridge]".to_string(),
+                None => err_result("No bridge available"),
             }
-        });
+        }
 
-        // http_get(url: String) -> String
-        engine.register_fn("http_get", |url: String| -> String {
-            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+        // Helper for HTTP POST
+        fn do_http_post(bridge_tx: Option<mpsc::Sender<AsyncRequest>>, url: String, headers: HashMap<String, String>, body: String) -> Map {
             match bridge_tx {
                 Some(tx) => {
-                    match blocking_http_get(&tx, url, HashMap::new()) {
-                        Ok(body) => body,
-                        Err(e) => format!("[HTTP Error: {}]", e),
+                    match blocking_http_post(&tx, url, headers, body, "application/json".to_string()) {
+                        Ok(resp) => ok_result(Dynamic::from(resp)),
+                        Err(e) => err_result(e),
                     }
                 }
-                None => "[Error: No bridge]".to_string(),
+                None => err_result("No bridge available"),
             }
+        }
+
+        // http_get(url: &str) -> Map
+        engine.register_fn("http_get", |url: &str| -> Map {
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+            do_http_get(bridge_tx, url.to_string(), HashMap::new())
         });
 
-        // http_get_with(url: &str, headers: Map) -> String
-        engine.register_fn("http_get_with", |url: &str, headers: Map| -> String {
+        // http_get(url: String) -> Map
+        engine.register_fn("http_get", |url: String| -> Map {
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+            do_http_get(bridge_tx, url, HashMap::new())
+        });
+
+        // http_get_with(url: &str, headers: Map) -> Map
+        engine.register_fn("http_get_with", |url: &str, headers: Map| -> Map {
             let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
             let headers_map: HashMap<String, String> = headers
                 .iter()
@@ -679,63 +675,25 @@ impl RhaiEngine {
                     v.clone().try_cast::<String>().map(|s| (k.to_string(), s))
                 })
                 .collect();
-
-            match bridge_tx {
-                Some(tx) => {
-                    match blocking_http_get(&tx, url.to_string(), headers_map) {
-                        Ok(body) => body,
-                        Err(e) => format!("[HTTP Error: {}]", e),
-                    }
-                }
-                None => "[Error: No bridge]".to_string(),
-            }
+            do_http_get(bridge_tx, url.to_string(), headers_map)
         });
 
-        // http_post(url: &str, body: &str) -> String
-        engine.register_fn("http_post", |url: &str, body: &str| -> String {
+        // http_post(url: &str, body: &str) -> Map
+        engine.register_fn("http_post", |url: &str, body: &str| -> Map {
             let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
-            match bridge_tx {
-                Some(tx) => {
-                    match blocking_http_post(
-                        &tx,
-                        url.to_string(),
-                        HashMap::new(),
-                        body.to_string(),
-                        "application/json".to_string(),
-                    ) {
-                        Ok(resp) => resp,
-                        Err(e) => format!("[HTTP Error: {}]", e),
-                    }
-                }
-                None => "[Error: No bridge]".to_string(),
-            }
+            do_http_post(bridge_tx, url.to_string(), HashMap::new(), body.to_string())
         });
 
-        // http_post(url: &str, body: Map) -> String (serializes Map to JSON)
-        engine.register_fn("http_post", |url: &str, body: Map| -> String {
+        // http_post(url: &str, body: Map) -> Map (serializes Map to JSON)
+        engine.register_fn("http_post", |url: &str, body: Map| -> Map {
             let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
             let json_body = crate::persistence::dynamic_to_json(&Dynamic::from(body));
             let body_str = serde_json::to_string(&json_body).unwrap_or_default();
-
-            match bridge_tx {
-                Some(tx) => {
-                    match blocking_http_post(
-                        &tx,
-                        url.to_string(),
-                        HashMap::new(),
-                        body_str,
-                        "application/json".to_string(),
-                    ) {
-                        Ok(resp) => resp,
-                        Err(e) => format!("[HTTP Error: {}]", e),
-                    }
-                }
-                None => "[Error: No bridge]".to_string(),
-            }
+            do_http_post(bridge_tx, url.to_string(), HashMap::new(), body_str)
         });
 
-        // http_post_with(url: &str, body: &str, headers: Map) -> String
-        engine.register_fn("http_post_with", |url: &str, body: &str, headers: Map| -> String {
+        // http_post_with(url: &str, body: &str, headers: Map) -> Map
+        engine.register_fn("http_post_with", |url: &str, body: &str, headers: Map| -> Map {
             let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
             let headers_map: HashMap<String, String> = headers
                 .iter()
@@ -743,22 +701,7 @@ impl RhaiEngine {
                     v.clone().try_cast::<String>().map(|s| (k.to_string(), s))
                 })
                 .collect();
-
-            match bridge_tx {
-                Some(tx) => {
-                    match blocking_http_post(
-                        &tx,
-                        url.to_string(),
-                        headers_map,
-                        body.to_string(),
-                        "application/json".to_string(),
-                    ) {
-                        Ok(resp) => resp,
-                        Err(e) => format!("[HTTP Error: {}]", e),
-                    }
-                }
-                None => "[Error: No bridge]".to_string(),
-            }
+            do_http_post(bridge_tx, url.to_string(), headers_map, body.to_string())
         });
     }
 
@@ -961,6 +904,67 @@ impl RhaiEngine {
             });
             debug!("Requested cancellation of timer {}", timer_id);
             true
+        });
+    }
+
+    /// Register image generation API functions
+    fn register_image_api(engine: &mut Engine) {
+        // Helper for image generation
+        fn do_image_generate(bridge_tx: Option<mpsc::Sender<AsyncRequest>>, config: ImageConfig, prompt: String) -> Map {
+            match bridge_tx {
+                Some(tx) => {
+                    match blocking_image_generate(&tx, config, prompt) {
+                        Ok(path) => ok_result(Dynamic::from(path)),
+                        Err(e) => {
+                            error!("Image generation failed: {}", e);
+                            err_result(e)
+                        }
+                    }
+                }
+                None => err_result("No bridge available"),
+            }
+        }
+
+        // image_generate(prompt: &str) -> Map { ok: bool, value/error: String }
+        engine.register_fn("image_generate", |prompt: &str| -> Map {
+            let config = IMAGE_CONFIG.with(|c| c.borrow().clone()).unwrap_or_default();
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+            do_image_generate(bridge_tx, config, prompt.to_string())
+        });
+
+        // image_generate(prompt: String) -> Map (overload)
+        engine.register_fn("image_generate", |prompt: String| -> Map {
+            let config = IMAGE_CONFIG.with(|c| c.borrow().clone()).unwrap_or_default();
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+            do_image_generate(bridge_tx, config, prompt)
+        });
+
+        // image_generate_with(config: Map, prompt: &str) -> Map
+        engine.register_fn("image_generate_with", |config_map: Map, prompt: &str| -> Map {
+            let bridge_tx = BRIDGE_TX.with(|b| b.borrow().clone());
+
+            let config = ImageConfig {
+                model_id: config_map
+                    .get("model_id")
+                    .and_then(|v| v.clone().try_cast::<String>())
+                    .unwrap_or_else(|| "black-forest-labs/FLUX.1-schnell".to_string()),
+                offloaded: config_map
+                    .get("offloaded")
+                    .and_then(|v| v.clone().try_cast::<bool>())
+                    .unwrap_or(true),
+                width: config_map
+                    .get("width")
+                    .and_then(|v| v.clone().try_cast::<i64>())
+                    .map(|v| v as usize)
+                    .unwrap_or(512),
+                height: config_map
+                    .get("height")
+                    .and_then(|v| v.clone().try_cast::<i64>())
+                    .map(|v| v as usize)
+                    .unwrap_or(512),
+            };
+
+            do_image_generate(bridge_tx, config, prompt.to_string())
         });
     }
 

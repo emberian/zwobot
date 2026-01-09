@@ -17,7 +17,7 @@ pub use engine::RhaiEngine;
 pub use script::{GameScript, ScriptMeta, CommandMeta, OptionMeta};
 pub use loader::ScriptLoader;
 pub use session::GameSession;
-pub use bridge::{AsyncBridge, AsyncRequest, LlmConfig};
+pub use bridge::{AsyncBridge, AsyncRequest, LlmConfig, ImageConfig};
 pub use persistence::PersistenceManager;
 pub use shared_state::SharedState;
 pub use timer::TimerManager;
@@ -157,6 +157,15 @@ impl RhaiGamesData {
         let ready_timers = self.timers.collect_ready().await;
 
         for timer in ready_timers {
+            // Check if session still exists before firing
+            if !self.sessions.read().await.contains_key(&timer.topic) {
+                debug!(
+                    "Timer {} fired but session {} no longer exists, skipping",
+                    timer.id, timer.topic
+                );
+                continue;
+            }
+
             debug!("Firing timer {} for topic {}", timer.id, timer.topic);
 
             // Get the script for this timer

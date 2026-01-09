@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::LlmConfig;
+use crate::{LlmConfig, ImageConfig};
 
 /// A compiled Rhai game script with metadata
 #[derive(Clone)]
@@ -39,6 +39,8 @@ pub struct ScriptMeta {
     pub handles_timers: bool,
     /// Default LLM config if script uses LLM
     pub default_llm: Option<LlmConfig>,
+    /// Default image generation config if script uses image generation
+    pub default_image: Option<ImageConfig>,
 }
 
 /// Metadata for a script command
@@ -68,6 +70,7 @@ impl GameScript {
     /// // @command debate(proposition: string!) - Start a new debate
     /// // @command judge() - Request judgment
     /// // @llm model=bartowski/Llama-3.2-1B-Instruct-GGUF quant=Q8_0 tokens=1024 temp=0.7
+    /// // @image model=black-forest-labs/FLUX.1-schnell width=512 height=512 offloaded=true
     /// ```
     pub fn parse_meta(source: &str) -> ScriptMeta {
         let mut meta = ScriptMeta::default();
@@ -96,6 +99,8 @@ impl GameScript {
                 }
             } else if let Some(rest) = content.strip_prefix("@llm ") {
                 meta.default_llm = Self::parse_llm_config(rest);
+            } else if let Some(rest) = content.strip_prefix("@image ") {
+                meta.default_image = Self::parse_image_config(rest);
             }
         }
 
@@ -206,6 +211,33 @@ impl GameScript {
             quantization,
             max_tokens,
             temperature,
+        })
+    }
+
+    /// Parse image config from annotation like `model=FLUX.1-schnell width=512 height=512 offloaded=true`
+    fn parse_image_config(input: &str) -> Option<ImageConfig> {
+        let mut model_id = String::from("black-forest-labs/FLUX.1-schnell");
+        let mut width = 512usize;
+        let mut height = 512usize;
+        let mut offloaded = true;
+
+        for part in input.split_whitespace() {
+            if let Some((key, value)) = part.split_once('=') {
+                match key {
+                    "model" => model_id = value.to_string(),
+                    "width" => width = value.parse().unwrap_or(512),
+                    "height" => height = value.parse().unwrap_or(512),
+                    "offloaded" => offloaded = value.parse().unwrap_or(true),
+                    _ => {}
+                }
+            }
+        }
+
+        Some(ImageConfig {
+            model_id,
+            width,
+            height,
+            offloaded,
         })
     }
 }

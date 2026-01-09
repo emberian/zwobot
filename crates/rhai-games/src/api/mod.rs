@@ -84,6 +84,8 @@ pub struct EmbedData {
     pub color: Option<i64>,
     pub fields: Vec<EmbedField>,
     pub footer: Option<String>,
+    /// Image path or URL to embed
+    pub image: Option<String>,
 }
 
 /// A field in an embed
@@ -110,6 +112,9 @@ impl EmbedData {
         }
         if let Some(footer) = map.get("footer") {
             embed.footer = footer.clone().try_cast::<String>();
+        }
+        if let Some(image) = map.get("image") {
+            embed.image = image.clone().try_cast::<String>();
         }
         if let Some(fields) = map.get("fields") {
             if let Some(fields_arr) = fields.clone().try_cast::<Array>() {
