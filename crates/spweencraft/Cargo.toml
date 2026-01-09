@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-spween = { path = "../../../spween", features = ["serde"] }
+spween = { git = "https://github.com/spwplace/spween", features = ["serde"] }
 tulip-bot = { path = "../tulip-bot" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
