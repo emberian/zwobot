@@ -37,7 +37,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # LLM
-mistralrs = { path = "/Users/ember/src/mistral.rs/mistralrs", features = ["metal"] }
+mistralrs = { git = "https://github.com/ericlbuehler/mistral.rs", features = ["metal"] }
 
 # Internal crates
 tulip-bot = { path = "crates/tulip-bot" }
