@@ -5,7 +5,7 @@
 use mistralrs::{
     Constraint, DiffusionGenerationParams, DiffusionLoaderType, DiffusionModelBuilder, GgufModelBuilder,
     ImageGenerationResponseFormat, IsqType, Model, NormalRequest, Request, RequestBuilder,
-    RequestMessage, ResponseOk, SamplingParams, TextMessageRole, TextMessages, TextModelBuilder,
+    RequestLike, RequestMessage, ResponseOk, SamplingParams, TextMessageRole, TextMessages, TextModelBuilder,
 };
 use std::sync::Arc;
 use thiserror::Error;
@@ -174,6 +174,94 @@ impl LlmEngine {
             elapsed_ms = elapsed.as_millis(),
             output_len = output.len(),
             "Chat completion complete"
+        );
+        trace!(output = %output, "Full output");
+
+        Ok(output)
+    }
+
+    /// Generate text with regex constraint.
+    ///
+    /// The output will be forced to match the given regex pattern.
+    /// Useful for structured output like YES/NO answers.
+    pub async fn generate_constrained(&self, prompt: &str, regex: &str) -> Result<String> {
+        debug!(prompt_len = prompt.len(), regex = %regex, "Starting constrained chat completion");
+        trace!(prompt = %prompt, "Full prompt");
+
+        let start = std::time::Instant::now();
+
+        let (tx, mut rx) = channel(1);
+
+        // Build chat messages
+        let mut messages = TextMessages::new().add_message(TextMessageRole::User, prompt);
+
+        let sampling_params = SamplingParams {
+            temperature: if self.temperature > 0.0 {
+                Some(self.temperature as f64)
+            } else {
+                None
+            },
+            top_k: if self.temperature <= 0.0 {
+                Some(1)
+            } else {
+                None
+            },
+            max_len: Some(self.max_tokens as usize),
+            ..SamplingParams::deterministic()
+        };
+
+        let request = Request::Normal(Box::new(NormalRequest {
+            id: 0,
+            messages: messages.take_messages(),
+            sampling_params,
+            response: tx,
+            return_logprobs: false,
+            is_streaming: false,
+            constraint: Constraint::Regex(regex.to_string()),
+            suffix: None,
+            tools: None,
+            tool_choice: None,
+            logits_processors: None,
+            return_raw_logits: false,
+            web_search_options: None,
+            model_id: None,
+            truncate_sequence: false,
+        }));
+
+        self.model
+            .inner()
+            .get_sender(None)
+            .map_err(|e| LlmError::Inference(e.to_string()))?
+            .send(request)
+            .await
+            .map_err(|e| LlmError::Inference(e.to_string()))?;
+
+        let response = rx
+            .recv()
+            .await
+            .ok_or_else(|| LlmError::Inference("Channel closed".to_string()))?;
+
+        let output = match response.as_result() {
+            Ok(ResponseOk::Done(resp)) => resp
+                .choices
+                .first()
+                .and_then(|c| c.message.content.as_ref())
+                .cloned()
+                .unwrap_or_default(),
+            Ok(other) => {
+                return Err(LlmError::Inference(format!(
+                    "Unexpected response type: {:?}",
+                    std::mem::discriminant(&other)
+                )))
+            }
+            Err(e) => return Err(LlmError::Inference(e.to_string())),
+        };
+
+        let elapsed = start.elapsed();
+        info!(
+            elapsed_ms = elapsed.as_millis(),
+            output_len = output.len(),
+            "Constrained chat completion complete"
         );
         trace!(output = %output, "Full output");
 

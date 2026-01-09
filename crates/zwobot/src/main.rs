@@ -27,6 +27,22 @@ struct AppConfig {
     debate_opponent: ModelConfig,
     debate_judge: ModelConfig,
     image_model: ImageModelConfig,
+    #[serde(default)]
+    ctc_detector: Option<CtcDetectorConfig>,
+}
+
+/// Cinnamon Toast Crunch Detector configuration
+#[derive(Debug, Deserialize, Clone)]
+struct CtcDetectorConfig {
+    /// Model for asking "is this the reason why kids love cinnamon toast crunch?"
+    question_model: ModelConfig,
+    /// Model for evaluating if the response was affirmative
+    evaluator_model: ModelConfig,
+    /// Puppet name to use when responding
+    puppet_name: String,
+    /// Optional puppet avatar URL
+    #[serde(default)]
+    puppet_avatar_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -85,6 +101,19 @@ struct BotData {
     image_config: ImageModelConfig,
     spweencraft: Arc<SpweencraftData>,
     rhai_games: Arc<RhaiGamesData>,
+    // Cinnamon Toast Crunch detector
+    ctc_detector: Option<CtcDetectorData>,
+}
+
+/// Data for the Cinnamon Toast Crunch detector
+#[derive(Clone)]
+struct CtcDetectorData {
+    question_model: Arc<RwLock<Option<Arc<LlmEngine>>>>,
+    evaluator_model: Arc<RwLock<Option<Arc<LlmEngine>>>>,
+    question_config: ModelConfig,
+    evaluator_config: ModelConfig,
+    puppet_name: String,
+    puppet_avatar_url: Option<String>,
 }
 
 /// /debate command - start a new debate
@@ -233,17 +262,7 @@ impl Command<BotData> for SpweenCommandWrapper {
             let topic = ctx.topic();
             let spween_data = &ctx.data.spweencraft;
 
-            // Check if there's already an active session
-            {
-                let sessions = spween_data.sessions.read().await;
-                if sessions.has_session(topic) {
-                    return Ok(Response::message(
-                        "There's already an active spween in this topic! End it first with `/spween_end`"
-                    ));
-                }
-            }
-
-            // Get the scene
+            // Get the scene first (before acquiring session lock)
             let scene = {
                 let registry = spween_data.registry.read().await;
                 registry.get_scene(&scene_id)
@@ -269,10 +288,19 @@ impl Command<BotData> for SpweenCommandWrapper {
                 }
             };
 
-            // Create a new session
+            // Check and create session atomically under single write lock
             let handler = spweencraft::BotEffectHandler::new();
             {
                 let mut sessions = spween_data.sessions.write().await;
+
+                // Check if there's already an active session
+                if sessions.has_session(topic) {
+                    return Ok(Response::message(
+                        "There's already an active spween in this topic! End it first with `/spween_end`"
+                    ));
+                }
+
+                // Create session (still under write lock)
                 if let Err(e) = sessions.start_session(topic, scene.clone(), handler) {
                     return Ok(Response::message(format!("Failed to start scene: {}", e)));
                 }
@@ -549,12 +577,36 @@ impl Command<BotData> for ImagineInfoCommand {
     }
 }
 
-/// Combined message handler for Rhai games, debates, and spweens
+/// Combined message handler for Rhai games, debates, spweens, and CTC detector
 async fn handle_combined_message(ctx: MessageContext<'_, BotData>) -> tulip_bot::Result<Option<Response>> {
     let topic = ctx.topic();
     let content = ctx.content().trim();
     let spween_data = &ctx.data.spweencraft;
     let rhai_games = &ctx.data.rhai_games;
+
+    // Run CTC detector in background on all messages (doesn't block other handlers)
+    // We spawn it so it doesn't interfere with the normal message flow
+    if ctx.data.ctc_detector.is_some() {
+        let ctc_ctx_channel = ctx.channel().to_string();
+        let ctc_ctx_topic = topic.to_string();
+        let ctc_ctx_content = content.to_string();
+        let ctc_ctx_message_id = ctx.message.id;
+        let ctc_ctx_client = ctx.client.clone();
+        let ctc_data = ctx.data.ctc_detector.as_ref().unwrap().clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = run_ctc_detector_background(
+                &ctc_ctx_channel,
+                &ctc_ctx_topic,
+                &ctc_ctx_content,
+                ctc_ctx_message_id,
+                &ctc_ctx_client,
+                &ctc_data,
+            ).await {
+                tracing::error!("CTC detector error: {}", e);
+            }
+        });
+    }
 
     // Priority 1: Check for active Rhai game session
     if rhai_games.has_session(topic).await {
@@ -569,7 +621,7 @@ async fn handle_combined_message(ctx: MessageContext<'_, BotData>) -> tulip_bot:
 
         match rhai_games.handle_message(topic, &exec_ctx).await {
             Ok(Some(response)) => {
-                return Ok(Some(convert_rhai_response(response)));
+                return Ok(Some(convert_rhai_response_with_upload(response, ctx.client).await));
             }
             Ok(None) => {
                 // Script didn't produce a response, continue to other handlers
@@ -609,7 +661,11 @@ async fn handle_combined_message(ctx: MessageContext<'_, BotData>) -> tulip_bot:
 }
 
 /// Convert a Rhai script response to a tulip-bot Response
-fn convert_rhai_response(rhai_resp: rhai_games::api::ScriptResponse) -> Response {
+/// If the response contains a local image path, uploads it first
+async fn convert_rhai_response_with_upload(
+    rhai_resp: rhai_games::api::ScriptResponse,
+    client: &TulipClient,
+) -> Response {
     if let Some(embed) = rhai_resp.embed {
         let mut builder = RichEmbed::builder();
         if let Some(title) = embed.title {
@@ -627,6 +683,26 @@ fn convert_rhai_response(rhai_resp: rhai_games::api::ScriptResponse) -> Response
         for field in embed.fields {
             builder = builder.field(&field.name, &field.value, field.inline);
         }
+
+        // Handle image - upload if it's a local file path
+        if let Some(ref image_path) = embed.image {
+            if image_path.starts_with("http://") || image_path.starts_with("https://") {
+                // Already a URL
+                builder = builder.image(image_path);
+            } else if std::path::Path::new(image_path).exists() {
+                // Local file - upload it
+                match client.upload_file(image_path).await {
+                    Ok(url) => {
+                        builder = builder.image(&url);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to upload image {}: {}", image_path, e);
+                        // Just log the error - can't modify description without accessing private fields
+                    }
+                }
+            }
+        }
+
         Response::embed(builder.build())
     } else if let Some(content) = rhai_resp.content {
         Response::message(content)
@@ -789,10 +865,9 @@ async fn handle_debate_message(ctx: MessageContext<'_, BotData>) -> tulip_bot::R
     };
 
     if !debate_exists {
-        // No active debate - prompt to start one
-        return Ok(Some(Response::message(
-            "No active debate. Start one with `/debate <proposition>`",
-        )));
+        // No active debate - silently ignore regular messages
+        // Users can start a debate with /debate command
+        return Ok(None);
     }
 
     // Add user's argument to history
@@ -843,6 +918,94 @@ async fn handle_debate_message(ctx: MessageContext<'_, BotData>) -> tulip_bot::R
     ctx.react("white_check_mark").await.ok();
 
     Ok(Some(Response::message(opponent_response)))
+}
+
+/// Run CTC detector in background
+///
+/// Watches every message and asks an LLM "is this the reason why kids love
+/// cinnamon toast crunch?" then asks another model to evaluate if the response
+/// was affirmative. If so, responds as a puppet.
+async fn run_ctc_detector_background(
+    channel: &str,
+    topic: &str,
+    content: &str,
+    message_id: i64,
+    client: &TulipClient,
+    ctc_data: &CtcDetectorData,
+) -> anyhow::Result<()> {
+    if content.is_empty() {
+        return Ok(());
+    }
+
+    // Load the question model
+    let question_model = get_or_load_model(
+        ctc_data.question_model.clone(),
+        &ctc_data.question_config,
+    )
+    .await?;
+
+    // Ask the question model
+    let question_prompt = format!(
+        r#"You are analyzing whether something could be "the reason why kids love Cinnamon Toast Crunch."
+
+The user said: "{}"
+
+Is this the reason why kids love Cinnamon Toast Crunch? Explain your reasoning briefly."#,
+        content
+    );
+
+    let question_response = question_model.generate(&question_prompt).await?;
+
+    tracing::debug!("CTC question response: {}", question_response);
+
+    // Load the evaluator model
+    let evaluator_model = get_or_load_model(
+        ctc_data.evaluator_model.clone(),
+        &ctc_data.evaluator_config,
+    )
+    .await?;
+
+    // Ask the evaluator if the response was affirmative (using constrained decoding)
+    let evaluator_prompt = format!(
+        r#"Read this response and determine if it answers YES or AFFIRMATIVELY to the question "Is this the reason why kids love Cinnamon Toast Crunch?"
+
+Response to evaluate:
+"{}"
+
+Reply with ONLY "YES" if the response is affirmative/positive, or "NO" if it is negative/dismissive."#,
+        question_response
+    );
+
+    // Use constrained decoding to force YES or NO output
+    let evaluator_response = evaluator_model
+        .generate_constrained(&evaluator_prompt, r"^\s*(YES|NO)\.?\s*$")
+        .await?;
+
+    let is_affirmative = evaluator_response.trim().trim_end_matches('.').to_uppercase() == "YES";
+    tracing::debug!("CTC evaluator response: {} (affirmative: {})", evaluator_response, is_affirmative);
+
+    if is_affirmative {
+        // Respond as the puppet!
+        client.add_reaction(message_id, "bowl_with_spoon").await.ok();
+
+        let puppet_message = format!(
+            "**THIS** is the reason why kids love Cinnamon Toast Crunch!\n\n> {}\n\n{}",
+            content,
+            question_response
+        );
+
+        client
+            .send_message_as_puppet(
+                channel,
+                topic,
+                &puppet_message,
+                &ctc_data.puppet_name,
+                ctc_data.puppet_avatar_url.as_deref(),
+            )
+            .await?;
+    }
+
+    Ok(())
 }
 
 /// Get or load a model
@@ -947,14 +1110,34 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize Rhai games engine
-    let rhai_games = match RhaiGamesData::new("scripts/").await {
-        Ok(data) => Arc::new(data),
+    let (rhai_games, mut timer_response_rx) = match RhaiGamesData::new("scripts/").await {
+        Ok(data) => data,
         Err(e) => {
             tracing::error!("Failed to initialize Rhai games: {}", e);
             return Err(anyhow::anyhow!("Rhai games init failed: {}", e));
         }
     };
+    let rhai_games = Arc::new(rhai_games);
+
+    // Start Rhai timer loop
+    rhai_games.start_timer_loop();
     info!("Rhai games engine initialized");
+
+    // Create CTC detector data if configured
+    let ctc_detector = app_config.ctc_detector.map(|config| {
+        info!(
+            "CTC Detector enabled with puppet '{}'",
+            config.puppet_name
+        );
+        CtcDetectorData {
+            question_model: Arc::new(RwLock::new(None)),
+            evaluator_model: Arc::new(RwLock::new(None)),
+            question_config: config.question_model,
+            evaluator_config: config.evaluator_model,
+            puppet_name: config.puppet_name,
+            puppet_avatar_url: config.puppet_avatar_url,
+        }
+    });
 
     // Create shared data
     let data = BotData {
@@ -967,6 +1150,7 @@ async fn main() -> anyhow::Result<()> {
         image_config: app_config.image_model,
         spweencraft: spween_data,
         rhai_games,
+        ctc_detector,
     };
 
     // Build framework
@@ -991,6 +1175,26 @@ async fn main() -> anyhow::Result<()> {
 
     // Register commands with Tulip
     framework.register_commands().await?;
+
+    // Spawn timer response handler
+    let client_for_timers = framework.client().clone();
+    tokio::spawn(async move {
+        while let Some(timer_resp) = timer_response_rx.recv().await {
+            // Convert script response to tulip response (with image upload support)
+            let response = convert_rhai_response_with_upload(timer_resp.response, &client_for_timers).await;
+
+            // Get channel - use the stored channel or fall back to a default
+            let channel = timer_resp.channel.as_deref().unwrap_or("general");
+            let topic = &timer_resp.topic;
+
+            // Send the response
+            if let Err(e) = client_for_timers.send_response(channel, topic, &response).await {
+                tracing::error!("Failed to send timer response to {}/{}: {}", channel, topic, e);
+            } else {
+                tracing::debug!("Sent timer response to {}/{}", channel, topic);
+            }
+        }
+    });
 
     // Run the bot
     framework.run().await?;

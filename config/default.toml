@@ -24,6 +24,25 @@ offloaded = false  # Set true for ~4GB VRAM, false for ~33GB (faster)
 default_width = 1280
 default_height = 720
 
+# Cinnamon Toast Crunch Detector
+# Watches every message and asks an LLM if it's "the reason why kids love
+# Cinnamon Toast Crunch", then uses constrained decoding to evaluate if the
+# answer was affirmative. If so, responds as a puppet character.
+[ctc_detector]
+puppet_name = "Cinnamon Toast Crunch Detective"
+
+[ctc_detector.question_model]
+model_id = "Qwen/Qwen3-1.7B"
+quantization = "Q4_K_M"
+max_tokens = 512
+temperature = 0.7
+
+[ctc_detector.evaluator_model]
+model_id = "google/gemma-3-270m-it"
+quantization = "Q4_K_M"
+max_tokens = 8
+temperature = 0.0
+
 # Topic to model mappings (optional overrides)
 [topics]
 
