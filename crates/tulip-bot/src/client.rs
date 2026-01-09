@@ -13,6 +13,7 @@ use std::path::Path;
 use tracing::{debug, info, trace};
 
 /// Client for interacting with the Tulip (Zulip) API
+#[derive(Clone)]
 pub struct TulipClient {
     client: Client,
     config: TulipConfig,
@@ -142,6 +143,63 @@ impl TulipClient {
 
         let resp: SendMessageResponse = response.json().await?;
         debug!("Message sent successfully to {}/{}, id={}", channel, topic, resp.id);
+        Ok(resp.id)
+    }
+
+    /// Send a message as a puppet (custom persona)
+    ///
+    /// Puppets allow bots to send messages with custom names and avatars.
+    /// The stream must have puppet mode enabled.
+    pub async fn send_message_as_puppet(
+        &self,
+        channel: &str,
+        topic: &str,
+        content: &str,
+        puppet_name: &str,
+        puppet_avatar_url: Option<&str>,
+    ) -> Result<i64> {
+        let url = format!("{}/api/v1/messages", self.config.site);
+
+        let mut params = HashMap::new();
+        params.insert("type", "stream".to_string());
+        params.insert("to", channel.to_string());
+        params.insert("topic", topic.to_string());
+        params.insert("content", content.to_string());
+        params.insert("puppet_name", puppet_name.to_string());
+        if let Some(avatar) = puppet_avatar_url {
+            params.insert("puppet_avatar_url", avatar.to_string());
+        }
+
+        trace!(
+            "Sending puppet message to {}/{} as '{}': {}",
+            channel,
+            topic,
+            puppet_name,
+            content
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to send puppet message ({}): {}",
+                status, text
+            )));
+        }
+
+        let resp: SendMessageResponse = response.json().await?;
+        debug!(
+            "Puppet message sent to {}/{} as '{}', id={}",
+            channel, topic, puppet_name, resp.id
+        );
         Ok(resp.id)
     }
 

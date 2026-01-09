@@ -8,6 +8,8 @@ use std::time::Instant;
 pub struct GameSession {
     /// Script ID this session is running
     pub script_id: String,
+    /// Channel/stream where this session is running
+    pub channel: Option<String>,
     /// Namespace for shared state (from script metadata)
     pub namespace: Option<String>,
     /// Custom state map accessible from scripts
@@ -35,6 +37,7 @@ impl GameSession {
     pub fn new(script_id: String) -> Self {
         Self {
             script_id,
+            channel: None,
             namespace: None,
             state: Map::new(),
             turn: 0,
@@ -44,10 +47,11 @@ impl GameSession {
         }
     }
 
-    /// Create a new game session with a namespace
-    pub fn with_namespace(script_id: String, namespace: Option<String>) -> Self {
+    /// Create a new game session with channel and namespace
+    pub fn with_channel(script_id: String, channel: Option<String>, namespace: Option<String>) -> Self {
         Self {
             script_id,
+            channel,
             namespace,
             state: Map::new(),
             turn: 0,

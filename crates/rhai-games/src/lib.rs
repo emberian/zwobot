@@ -63,6 +63,17 @@ pub enum RhaiError {
 /// Result type for rhai-games operations
 pub type Result<T> = std::result::Result<T, RhaiError>;
 
+/// A timer response that needs to be sent to a channel
+#[derive(Debug)]
+pub struct TimerResponse {
+    /// The topic/thread where the response should be sent
+    pub topic: String,
+    /// The channel/stream name (if known from session)
+    pub channel: Option<String>,
+    /// The response content
+    pub response: api::ScriptResponse,
+}
+
 /// Main integration type that holds all Rhai game state
 pub struct RhaiGamesData {
     /// Script loader with hot reload
@@ -75,6 +86,8 @@ pub struct RhaiGamesData {
     bridge_tx: mpsc::Sender<AsyncRequest>,
     /// Timer manager
     pub timers: Arc<TimerManager>,
+    /// Channel for timer responses that need to be sent
+    timer_response_tx: mpsc::Sender<TimerResponse>,
     /// Persistence manager
     pub persistence: Arc<PersistenceManager>,
     /// Shared state manager
@@ -83,15 +96,17 @@ pub struct RhaiGamesData {
 
 impl RhaiGamesData {
     /// Create a new RhaiGamesData instance
-    pub async fn new(scripts_dir: impl Into<PathBuf>) -> Result<Self> {
+    /// Returns the data and a receiver for timer responses that need to be sent
+    pub async fn new(scripts_dir: impl Into<PathBuf>) -> Result<(Self, mpsc::Receiver<TimerResponse>)> {
         Self::with_data_dir(scripts_dir, "data/rhai-games").await
     }
 
     /// Create with custom data directory
+    /// Returns the data and a receiver for timer responses that need to be sent
     pub async fn with_data_dir(
         scripts_dir: impl Into<PathBuf>,
         data_dir: impl Into<PathBuf>,
-    ) -> Result<Self> {
+    ) -> Result<(Self, mpsc::Receiver<TimerResponse>)> {
         let scripts_dir = scripts_dir.into();
         let data_dir = data_dir.into();
 
@@ -109,6 +124,9 @@ impl RhaiGamesData {
 
         // Create timer manager
         let timers = Arc::new(TimerManager::new());
+
+        // Create timer response channel
+        let (timer_response_tx, timer_response_rx) = mpsc::channel(64);
 
         // Create shared state manager with persistence
         let shared_state = Arc::new(SharedState::new(Some(persistence.clone())));
@@ -131,15 +149,17 @@ impl RhaiGamesData {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             bridge_tx,
             timers,
+            timer_response_tx,
             persistence,
             shared_state,
         };
 
-        Ok(data)
+        Ok((data, timer_response_rx))
     }
 
-    /// Start the timer tick loop (should be spawned as a background task)
+    /// Start the timer tick loop and shared state auto-save (should be called once)
     pub fn start_timer_loop(self: &Arc<Self>) {
+        // Start timer tick loop
         let data = Arc::clone(self);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(100));
@@ -150,6 +170,9 @@ impl RhaiGamesData {
                 }
             }
         });
+
+        // Start shared state auto-save loop
+        self.shared_state.start_auto_save();
     }
 
     /// Process ready timers
@@ -202,6 +225,11 @@ impl RhaiGamesData {
                 },
             };
 
+            // Get channel from session if available
+            let channel = self.sessions.read().await
+                .get(&timer.topic)
+                .and_then(|s| s.channel.clone());
+
             // Execute the on_timer handler
             match self.engine.call_script_fn(
                 &script,
@@ -214,7 +242,15 @@ impl RhaiGamesData {
                 Ok(response) => {
                     if let Some(resp) = response {
                         debug!("Timer {} produced response: {:?}", timer.id, resp.content);
-                        // Timer responses could be sent to a channel here if needed
+                        // Send response through channel for the bot to deliver
+                        let timer_resp = TimerResponse {
+                            topic: timer.topic.clone(),
+                            channel,
+                            response: resp,
+                        };
+                        if let Err(e) = self.timer_response_tx.send(timer_resp).await {
+                            error!("Failed to send timer response: {}", e);
+                        }
                     }
                 }
                 Err(e) => {
@@ -255,7 +291,7 @@ impl RhaiGamesData {
     }
 
     /// Start a new game session for a topic
-    pub async fn start_session(&self, topic: &str, script_id: &str) -> Result<()> {
+    pub async fn start_session(&self, topic: &str, channel: Option<&str>, script_id: &str) -> Result<()> {
         // Verify script exists and get namespace
         let script = self.loader.get(script_id).await
             .ok_or_else(|| RhaiError::ScriptNotFound(script_id.to_string()))?;
@@ -265,7 +301,7 @@ impl RhaiGamesData {
         let mut sessions = self.sessions.write().await;
         sessions.insert(
             topic.to_string(),
-            GameSession::with_namespace(script_id.to_string(), namespace.clone()),
+            GameSession::with_channel(script_id.to_string(), channel.map(String::from), namespace.clone()),
         );
         info!(
             "Started session for topic '{}' with script '{}' (namespace: {:?})",
@@ -297,15 +333,17 @@ impl RhaiGamesData {
         let script = self.loader.get(script_id).await
             .ok_or_else(|| RhaiError::ScriptNotFound(script_id.to_string()))?;
 
-        // Get or create session with namespace
+        // Get or create session with channel and namespace
         let topic = ctx.topic.clone();
+        let channel = ctx.channel.clone();
         {
             let mut sessions = self.sessions.write().await;
             sessions
                 .entry(topic.clone())
                 .or_insert_with(|| {
-                    GameSession::with_namespace(
+                    GameSession::with_channel(
                         script_id.to_string(),
+                        Some(channel.clone()),
                         script.meta.namespace.clone(),
                     )
                 });

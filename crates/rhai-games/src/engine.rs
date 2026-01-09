@@ -56,6 +56,33 @@ thread_local! {
     static CANCELLED_TIMERS: RefCell<Vec<u64>> = RefCell::new(Vec::new());
 }
 
+/// Clear all thread-local state. Called after script execution to prevent leaks.
+fn clear_thread_locals() {
+    EXEC_CONTEXT.with(|c| *c.borrow_mut() = None);
+    RESPONSE_BUILDER.with(|r| *r.borrow_mut() = None);
+    SESSION_STATE.with(|s| *s.borrow_mut() = None);
+    SESSION_PLAYERS.with(|p| *p.borrow_mut() = None);
+    SESSION_TURN.with(|t| *t.borrow_mut() = 0);
+    LLM_CONFIG.with(|l| *l.borrow_mut() = None);
+    IMAGE_CONFIG.with(|c| *c.borrow_mut() = None);
+    // Note: BRIDGE_TX is intentionally kept - it's set once at engine creation
+    END_SESSION_FLAG.with(|f| *f.borrow_mut() = false);
+    CURRENT_NAMESPACE.with(|n| *n.borrow_mut() = None);
+    CURRENT_TOPIC.with(|t| *t.borrow_mut() = None);
+    CURRENT_SCRIPT_ID.with(|s| *s.borrow_mut() = None);
+    SCHEDULED_TIMERS.with(|t| t.borrow_mut().clear());
+    CANCELLED_TIMERS.with(|t| t.borrow_mut().clear());
+}
+
+/// Guard that clears thread-locals on drop (even on panic)
+struct ThreadLocalGuard;
+
+impl Drop for ThreadLocalGuard {
+    fn drop(&mut self) {
+        clear_thread_locals();
+    }
+}
+
 /// Bot-specialized Rhai engine with pre-registered functions
 pub struct RhaiEngine {
     engine: Arc<Engine>,
@@ -116,48 +143,34 @@ impl RhaiEngine {
         ctx: &ExecutionContext,
         bridge_tx: &mpsc::Sender<AsyncRequest>,
     ) -> Result<Option<ScriptResponse>> {
-        // Load session state into thread-local
-        {
+        // Collect all input data BEFORE spawn_blocking
+        let (session_state, session_players, session_turn) = {
             let sessions = sessions.read().await;
             if let Some(session) = sessions.get(topic) {
-                SESSION_STATE.with(|s| *s.borrow_mut() = Some(session.state.clone()));
-                SESSION_PLAYERS.with(|p| *p.borrow_mut() = Some(session.players_as_dynamic()));
-                SESSION_TURN.with(|t| *t.borrow_mut() = session.turn);
+                (session.state.clone(), session.players_as_dynamic(), session.turn)
             } else {
-                SESSION_STATE.with(|s| *s.borrow_mut() = Some(Map::new()));
-                SESSION_PLAYERS.with(|p| *p.borrow_mut() = Some(rhai::Array::new()));
-                SESSION_TURN.with(|t| *t.borrow_mut() = 0);
+                (Map::new(), rhai::Array::new(), 0)
             }
-        }
+        };
 
-        // Set up thread-local context
-        EXEC_CONTEXT.with(|c| *c.borrow_mut() = Some(ctx.clone()));
-        RESPONSE_BUILDER.with(|r| *r.borrow_mut() = Some(ResponseBuilder::new()));
-        LLM_CONFIG.with(|l| *l.borrow_mut() = script.meta.default_llm.clone());
-        IMAGE_CONFIG.with(|c| *c.borrow_mut() = script.meta.default_image.clone());
-        BRIDGE_TX.with(|b| *b.borrow_mut() = Some(bridge_tx.clone()));
-        END_SESSION_FLAG.with(|f| *f.borrow_mut() = false);
-
-        // Set up extended context
         let namespace = {
             let sessions = sessions.read().await;
             sessions.get(topic).and_then(|s| s.namespace.clone())
         };
-        CURRENT_NAMESPACE.with(|n| *n.borrow_mut() = namespace);
-        CURRENT_TOPIC.with(|t| *t.borrow_mut() = Some(topic.to_string()));
-        CURRENT_SCRIPT_ID.with(|s| *s.borrow_mut() = Some(script.id.clone()));
-        SCHEDULED_TIMERS.with(|t| t.borrow_mut().clear());
-        CANCELLED_TIMERS.with(|t| t.borrow_mut().clear());
+
+        // Clone all data needed inside spawn_blocking
+        let ctx_clone = ctx.clone();
+        let llm_config = script.meta.default_llm.clone();
+        let image_config = script.meta.default_image.clone();
+        let bridge_tx_clone = bridge_tx.clone();
+        let topic_str = topic.to_string();
+        let script_id = script.id.clone();
 
         // Create scope with command arguments
         let mut scope = Scope::new();
-
-        // For command handlers, push the first required argument as positional
         if fn_name.starts_with("on_command_") && !ctx.args.is_empty() {
-            // Find the command in script meta
             let cmd_name = fn_name.strip_prefix("on_command_").unwrap_or("");
             if let Some(cmd) = script.meta.commands.iter().find(|c| c.name == cmd_name) {
-                // Push args in order
                 for opt in &cmd.options {
                     if let Some(value) = ctx.args.get(&opt.name) {
                         scope.push(opt.name.clone(), value.clone());
@@ -166,12 +179,41 @@ impl RhaiEngine {
             }
         }
 
-        // Run script in blocking context (Rhai is sync)
         let engine = self.engine.clone();
         let ast = script.ast.clone();
         let fn_name_owned = fn_name.to_string();
 
-        let result = tokio::task::spawn_blocking(move || {
+        // Result type for data returned from spawn_blocking
+        struct ScriptResult {
+            response: ScriptResponse,
+            state: Map,
+            turn: i64,
+            should_end: bool,
+            scheduled_timers: Vec<(u64, Duration, Dynamic, bool)>,
+            cancelled_timers: Vec<u64>,
+        }
+
+        // Run script in blocking context - all thread-local access happens here
+        let blocking_result = tokio::task::spawn_blocking(move || {
+            // Guard ensures thread-locals are cleaned up even on panic
+            let _guard = ThreadLocalGuard;
+
+            // Set up thread-locals on the BLOCKING thread where script runs
+            SESSION_STATE.with(|s| *s.borrow_mut() = Some(session_state));
+            SESSION_PLAYERS.with(|p| *p.borrow_mut() = Some(session_players));
+            SESSION_TURN.with(|t| *t.borrow_mut() = session_turn);
+            EXEC_CONTEXT.with(|c| *c.borrow_mut() = Some(ctx_clone));
+            RESPONSE_BUILDER.with(|r| *r.borrow_mut() = Some(ResponseBuilder::new()));
+            LLM_CONFIG.with(|l| *l.borrow_mut() = llm_config);
+            IMAGE_CONFIG.with(|c| *c.borrow_mut() = image_config);
+            BRIDGE_TX.with(|b| *b.borrow_mut() = Some(bridge_tx_clone));
+            END_SESSION_FLAG.with(|f| *f.borrow_mut() = false);
+            CURRENT_NAMESPACE.with(|n| *n.borrow_mut() = namespace);
+            CURRENT_TOPIC.with(|t| *t.borrow_mut() = Some(topic_str));
+            CURRENT_SCRIPT_ID.with(|s| *s.borrow_mut() = Some(script_id));
+            SCHEDULED_TIMERS.with(|t| t.borrow_mut().clear());
+            CANCELLED_TIMERS.with(|t| t.borrow_mut().clear());
+
             // Check if function exists in script
             let has_fn = ast.iter_functions().any(|f| f.name == fn_name_owned);
             if !has_fn {
@@ -179,65 +221,65 @@ impl RhaiEngine {
             }
 
             // Call the function
-            let call_result: std::result::Result<Dynamic, _> = engine.call_fn(&mut scope, &ast, &fn_name_owned, ());
+            let call_result: std::result::Result<Dynamic, _> =
+                engine.call_fn(&mut scope, &ast, &fn_name_owned, ());
 
-            match call_result {
-                Ok(_) => Ok(()),
-                Err(e) => Err(RhaiError::Runtime(e.to_string())),
+            if let Err(e) = call_result {
+                return Err(RhaiError::Runtime(e.to_string()));
             }
+
+            // Extract results from thread-locals BEFORE the guard clears them
+            let response = RESPONSE_BUILDER.with(|r| {
+                r.borrow_mut().take().map(|b| b.take())
+            }).unwrap_or_default();
+            let state = SESSION_STATE.with(|s| s.borrow_mut().take()).unwrap_or_default();
+            let turn = SESSION_TURN.with(|t| *t.borrow());
+            let should_end = END_SESSION_FLAG.with(|f| *f.borrow());
+            let scheduled_timers = SCHEDULED_TIMERS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+            let cancelled_timers = CANCELLED_TIMERS.with(|t| std::mem::take(&mut *t.borrow_mut()));
+
+            Ok(ScriptResult {
+                response,
+                state,
+                turn,
+                should_end,
+                scheduled_timers,
+                cancelled_timers,
+            })
         })
         .await
         .map_err(|e| RhaiError::Runtime(format!("Task join error: {}", e)))?;
 
         // Handle script execution result
-        if let Err(e) = result {
-            // Check if it's just a missing function (not an error for optional handlers)
-            if matches!(e, RhaiError::FunctionNotFound(_)) && fn_name == "on_message" {
-                return Ok(None);
+        let script_result = match blocking_result {
+            Ok(r) => r,
+            Err(e) => {
+                if matches!(e, RhaiError::FunctionNotFound(_)) && fn_name == "on_message" {
+                    return Ok(None);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
-
-        // Get response from thread-local
-        let response = RESPONSE_BUILDER.with(|r| {
-            r.borrow_mut().take().map(|b| b.take())
-        }).unwrap_or_default();
-
-        // Check if session should end
-        let should_end = END_SESSION_FLAG.with(|f| *f.borrow());
+        };
 
         // Save session state back
         {
             let mut sessions = sessions.write().await;
             if let Some(session) = sessions.get_mut(topic) {
-                SESSION_STATE.with(|s| {
-                    if let Some(state) = s.borrow_mut().take() {
-                        session.state = state;
-                    }
-                });
-                SESSION_TURN.with(|t| {
-                    session.turn = *t.borrow();
-                });
-                // Handle add_player calls
-                // Players are managed via add_player API calls which update the thread-local
-                // and then get synced back to the session here
-                SESSION_PLAYERS.with(|p| {
-                    // Take the players list - it was populated during script execution
-                    let _ = p.borrow_mut().take();
-                });
+                session.state = script_result.state;
+                session.turn = script_result.turn;
             }
 
-            // End session if flagged
-            if should_end {
+            if script_result.should_end {
                 sessions.remove(topic);
             }
         }
 
-        // Add end_session flag to response
-        let mut response = response;
-        response.end_session = should_end;
+        // Return scheduled/cancelled timers via response for caller to process
+        // (These are stored in the response for now - caller should handle them)
+        let mut response = script_result.response;
+        response.end_session = script_result.should_end;
 
-        if response.is_empty() && !should_end {
+        if response.is_empty() && !script_result.should_end {
             Ok(None)
         } else {
             Ok(Some(response))

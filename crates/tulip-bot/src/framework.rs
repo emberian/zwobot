@@ -389,21 +389,115 @@ fn parse_command(content: &str) -> Option<(&str, &str)> {
 }
 
 /// Parse arguments from command string
-fn parse_args(args_str: &str, _options: &[crate::command::CommandOption]) -> Args {
-    // Simple space-separated parsing for now
-    // TODO: More sophisticated parsing with quotes, named args, etc.
+/// Supports:
+/// - Positional args assigned to options in order
+/// - Quoted strings: `"hello world"` or `'hello world'`
+/// - If there's only one option, the entire string goes to it
+fn parse_args(args_str: &str, options: &[crate::command::CommandOption]) -> Args {
     let mut values = HashMap::new();
 
-    // For now, treat the entire string as a single positional argument
-    // named "input" or the first option name
-    if !args_str.is_empty() {
-        values.insert("input".to_string(), args_str.to_string());
+    if args_str.is_empty() || options.is_empty() {
+        return Args::new(values);
+    }
 
-        // Also set it as the first option if there is one
-        if let Some(first_opt) = _options.first() {
-            values.insert(first_opt.name.clone(), args_str.to_string());
+    // If there's only one option, give it the entire string (common case)
+    if options.len() == 1 {
+        values.insert(options[0].name.clone(), args_str.to_string());
+        values.insert("input".to_string(), args_str.to_string());
+        return Args::new(values);
+    }
+
+    // Parse into tokens respecting quotes
+    let tokens = tokenize_args(args_str);
+
+    // Assign tokens to options positionally
+    for (i, token) in tokens.iter().enumerate() {
+        if i < options.len() {
+            values.insert(options[i].name.clone(), token.clone());
         }
     }
 
+    // Also set "input" to the full string for backwards compatibility
+    values.insert("input".to_string(), args_str.to_string());
+
     Args::new(values)
+}
+
+/// Tokenize an argument string, respecting quoted strings
+fn tokenize_args(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        match (c, in_quote) {
+            // Start of quoted string
+            ('"' | '\'', None) => {
+                in_quote = Some(c);
+            }
+            // End of quoted string
+            (q, Some(quote)) if q == quote => {
+                in_quote = None;
+                // Don't push empty quoted strings as separate tokens
+                if !current.is_empty() || tokens.is_empty() {
+                    // Keep the current token - it will be pushed on whitespace or end
+                }
+            }
+            // Whitespace outside quotes = token boundary
+            (c, None) if c.is_whitespace() => {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            }
+            // Regular character
+            (c, _) => {
+                current.push(c);
+            }
+        }
+    }
+
+    // Push final token
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tokenize_simple() {
+        assert_eq!(tokenize_args("foo bar baz"), vec!["foo", "bar", "baz"]);
+    }
+
+    #[test]
+    fn test_tokenize_quoted() {
+        assert_eq!(
+            tokenize_args(r#"foo "hello world" baz"#),
+            vec!["foo", "hello world", "baz"]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_single_quotes() {
+        assert_eq!(
+            tokenize_args("foo 'hello world' baz"),
+            vec!["foo", "hello world", "baz"]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_extra_whitespace() {
+        assert_eq!(tokenize_args("  foo   bar  "), vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn test_tokenize_empty() {
+        assert!(tokenize_args("").is_empty());
+        assert!(tokenize_args("   ").is_empty());
+    }
 }

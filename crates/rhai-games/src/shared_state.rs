@@ -123,6 +123,21 @@ impl SharedState {
         Ok(())
     }
 
+    /// Start the auto-save loop (should be spawned as a background task)
+    /// Saves dirty state every 30 seconds
+    pub fn start_auto_save(self: &Arc<Self>) {
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                interval.tick().await;
+                if let Err(e) = state.save_dirty().await {
+                    tracing::error!("Failed to auto-save shared state: {}", e);
+                }
+            }
+        });
+    }
+
     // ---- Global state operations ----
 
     /// Get a value from global state

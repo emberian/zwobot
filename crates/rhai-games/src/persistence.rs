@@ -9,6 +9,19 @@ use std::path::PathBuf;
 use tokio::fs;
 use tracing::{debug, warn};
 
+/// Sanitize a path component to prevent directory traversal attacks.
+/// Removes any path separators and dangerous sequences.
+fn sanitize_path_component(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            // Allow alphanumeric, underscore, hyphen, dot (but not leading dot)
+            c.is_alphanumeric() || *c == '_' || *c == '-'
+        })
+        .collect::<String>()
+        .trim_start_matches('.')
+        .to_string()
+}
+
 /// RON-based persistence manager
 pub struct PersistenceManager {
     base_dir: PathBuf,
@@ -28,14 +41,21 @@ impl PersistenceManager {
         }
     }
 
-    /// Get the file path for a namespace/key pair
+    /// Get the file path for a namespace/key pair.
+    /// Sanitizes inputs to prevent directory traversal attacks.
     fn file_path(&self, namespace: &str, key: &str) -> PathBuf {
-        self.base_dir.join(namespace).join(format!("{}.ron", key))
+        let safe_namespace = sanitize_path_component(namespace);
+        let safe_key = sanitize_path_component(key);
+        self.base_dir
+            .join(if safe_namespace.is_empty() { "_default" } else { &safe_namespace })
+            .join(format!("{}.ron", if safe_key.is_empty() { "_unnamed" } else { &safe_key }))
     }
 
-    /// Ensure the namespace directory exists
+    /// Ensure the namespace directory exists.
+    /// Sanitizes namespace to prevent directory traversal.
     async fn ensure_dir(&self, namespace: &str) -> std::io::Result<PathBuf> {
-        let dir = self.base_dir.join(namespace);
+        let safe_namespace = sanitize_path_component(namespace);
+        let dir = self.base_dir.join(if safe_namespace.is_empty() { "_default" } else { &safe_namespace });
         fs::create_dir_all(&dir).await?;
         Ok(dir)
     }
@@ -79,7 +99,8 @@ impl PersistenceManager {
 
     /// List all keys in a namespace
     pub async fn list(&self, namespace: &str) -> Result<Vec<String>, String> {
-        let dir = self.base_dir.join(namespace);
+        let safe_namespace = sanitize_path_component(namespace);
+        let dir = self.base_dir.join(if safe_namespace.is_empty() { "_default" } else { &safe_namespace });
 
         // Use async metadata check instead of blocking exists()
         if fs::metadata(&dir).await.is_err() {
@@ -207,6 +228,27 @@ pub fn json_to_dynamic(v: &serde_json::Value) -> Dynamic {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_sanitize_path_component() {
+        // Normal names pass through
+        assert_eq!(sanitize_path_component("my_game"), "my_game");
+        assert_eq!(sanitize_path_component("game-123"), "game-123");
+
+        // Path traversal attempts are blocked
+        assert_eq!(sanitize_path_component("../../../etc"), "etc");
+        assert_eq!(sanitize_path_component(".."), "");
+        assert_eq!(sanitize_path_component("foo/bar"), "foobar");
+        assert_eq!(sanitize_path_component("foo\\bar"), "foobar");
+
+        // Leading dots are stripped
+        assert_eq!(sanitize_path_component(".hidden"), "hidden");
+        assert_eq!(sanitize_path_component("...dots"), "dots");
+
+        // Empty and special cases
+        assert_eq!(sanitize_path_component(""), "");
+        assert_eq!(sanitize_path_component("/"), "");
+    }
 
     #[test]
     fn test_dynamic_json_roundtrip() {
