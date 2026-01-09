@@ -7,6 +7,7 @@ import './styles/globals.css';
 
 // Component imports (will be added as we build them)
 import { Dialogue } from './components/game/Dialogue';
+import { Transcript } from './components/game/Transcript';
 // import { Room } from './components/game/Room';
 // import { Combat } from './components/game/Combat';
 // import { DiceRoll } from './components/game/DiceRoll';
@@ -14,6 +15,7 @@ import { Dialogue } from './components/game/Dialogue';
 // Component registry
 const components: Record<string, React.ComponentType<any>> = {
   dialogue: Dialogue,
+  transcript: Transcript,
   // room: Room,
   // combat: Combat,
   // diceRoll: DiceRoll,
@@ -136,4 +138,6 @@ export type {
   DiceRollProps,
   ResourceBarProps,
   PortraitProps,
+  TranscriptProps,
+  TranscriptEntry,
 } from './types';

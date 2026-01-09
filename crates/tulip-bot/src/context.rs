@@ -246,6 +246,7 @@ pub struct AutocompleteContext<'a, D> {
     pub option: &'a str,
     pub partial: &'a str,
     pub user: &'a User,
+    pub context: &'a serde_json::Value,
     pub client: &'a TulipClient,
     pub data: &'a D,
 }
@@ -257,6 +258,7 @@ impl<'a, D> AutocompleteContext<'a, D> {
         option: &'a str,
         partial: &'a str,
         user: &'a User,
+        context: &'a serde_json::Value,
         client: &'a TulipClient,
         data: &'a D,
     ) -> Self {
@@ -265,8 +267,72 @@ impl<'a, D> AutocompleteContext<'a, D> {
             option,
             partial,
             user,
+            context,
             client,
             data,
         }
+    }
+}
+
+/// Context for command invocation handlers (slash commands invoked via UI)
+pub struct CommandInvocationContext<'a, D> {
+    pub command: &'a str,
+    pub args: Args,
+    pub interaction_id: &'a str,
+    pub message_id: i64,
+    pub user: &'a User,
+    pub stream_id: Option<i64>,
+    pub topic: Option<&'a str>,
+    pub client: &'a TulipClient,
+    pub data: &'a D,
+}
+
+impl<'a, D> CommandInvocationContext<'a, D> {
+    /// Create a new command invocation context
+    pub fn new(
+        command: &'a str,
+        args: Args,
+        interaction_id: &'a str,
+        message_id: i64,
+        user: &'a User,
+        stream_id: Option<i64>,
+        topic: Option<&'a str>,
+        client: &'a TulipClient,
+        data: &'a D,
+    ) -> Self {
+        Self {
+            command,
+            args,
+            interaction_id,
+            message_id,
+            user,
+            stream_id,
+            topic,
+            client,
+            data,
+        }
+    }
+
+    /// Reply to the command invocation
+    pub async fn reply(&self, response: impl Into<Response>) -> Result<Option<i64>> {
+        let response = response.into();
+        if let (Some(stream_id), Some(topic)) = (self.stream_id, self.topic) {
+            // For stream messages, we need the stream name - use stream_id for now
+            // TODO: Look up stream name from stream_id or add stream name to context
+            self.client
+                .send_response_to_stream_id(stream_id, topic, &response)
+                .await
+        } else {
+            // For DMs, send to the user
+            self.client
+                .send_private_message(self.user.id, &response.content.unwrap_or_default())
+                .await
+                .map(Some)
+        }
+    }
+
+    /// Get the user who invoked the command
+    pub fn invoker(&self) -> &User {
+        self.user
     }
 }

@@ -1,6 +1,6 @@
 //! Command system for slash commands
 
-use crate::context::{AutocompleteContext, CommandContext};
+use crate::context::{AutocompleteContext, CommandContext, CommandInvocationContext};
 use crate::error::Result;
 use crate::response::Response;
 use futures::future::BoxFuture;
@@ -155,5 +155,20 @@ pub trait Command<D>: Send + Sync {
         _ctx: AutocompleteContext<'a, D>,
     ) -> BoxFuture<'a, Result<Vec<Choice>>> {
         Box::pin(async { Ok(vec![]) })
+    }
+
+    /// Execute the command when invoked via UI (slash command picker)
+    ///
+    /// This is called when users invoke the command through the Tulip UI
+    /// (slash command menu) rather than typing in chat. The context includes
+    /// the interaction_id for tracking and pre-parsed arguments.
+    ///
+    /// By default, returns an empty response. Override this for commands
+    /// that should respond to UI invocations.
+    fn execute_invocation<'a>(
+        &'a self,
+        _ctx: CommandInvocationContext<'a, D>,
+    ) -> BoxFuture<'a, Result<Response>> {
+        Box::pin(async { Ok(Response::empty()) })
     }
 }

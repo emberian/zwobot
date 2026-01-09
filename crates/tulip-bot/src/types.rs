@@ -43,6 +43,9 @@ pub struct User {
 }
 
 /// An event from the Tulip event queue
+///
+/// Events are polymorphic - different event types have different fields.
+/// We capture the raw data and parse it based on the event type.
 #[derive(Debug, Deserialize)]
 pub struct Event {
     pub id: i64,
@@ -56,6 +59,22 @@ pub struct Event {
     /// For autocomplete events
     #[serde(default)]
     pub autocomplete: Option<AutocompleteEvent>,
+    /// For submessage events
+    #[serde(default)]
+    pub submessage: Option<SubMessageEvent>,
+    /// Command invocation fields (present when type == "command_invocation")
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub arguments: Option<std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub interaction_id: Option<String>,
+    #[serde(default)]
+    pub message_id: Option<i64>,
+    #[serde(default)]
+    pub user: Option<User>,
+    #[serde(default)]
+    pub context: Option<InvocationContext>,
 }
 
 /// Raw interaction event from Tulip
@@ -76,7 +95,42 @@ pub struct AutocompleteEvent {
     pub command: String,
     pub option: String,
     pub partial: String,
+    #[serde(default)]
+    pub context: serde_json::Value,
     pub user: User,
+}
+
+/// Context data for command invocations (stream/topic info)
+#[derive(Debug, Clone, Deserialize)]
+pub struct InvocationContext {
+    pub stream_id: Option<i64>,
+    pub topic: Option<String>,
+}
+
+/// Raw command invocation event from Tulip
+#[derive(Debug, Clone, Deserialize)]
+pub struct CommandInvocationEvent {
+    pub bot_user_id: i64,
+    pub user_profile_id: i64,
+    pub message_id: i64,
+    pub interaction_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub arguments: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub context: Option<InvocationContext>,
+    pub user: User,
+}
+
+/// Raw submessage event from Tulip
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubMessageEvent {
+    pub message_id: i64,
+    pub submessage_id: i64,
+    pub sender_id: i64,
+    pub msg_type: String,
+    #[serde(default)]
+    pub content: serde_json::Value,
 }
 
 /// Configuration for connecting to Tulip

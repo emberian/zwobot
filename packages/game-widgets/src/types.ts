@@ -1,9 +1,27 @@
+// Submessage data received from freeform widget
+export interface SubmessageData {
+  submessage_id: number;
+  sender_id: number;
+  msg_type: string;
+  content: unknown;
+}
+
 // Widget context passed from freeform widget
 export interface WidgetContext {
   message_id: number;
   post_interaction: (data: Record<string, unknown>) => void;
+  post_submessage?: (data: Record<string, unknown>) => Promise<void>;
+  on_submessage?: (callback: (data: SubmessageData) => void) => void;
   on: (event: string, selector: string, handler: (e: Event) => void) => void;
   update_html: (html: string) => void;
+  // Current user info for attribution
+  current_user?: {
+    user_id: number;
+    full_name: string;
+    avatar_url?: string;
+  };
+  // Initial submessages that existed when widget was rendered
+  initial_submessages?: SubmessageData[];
 }
 
 // Dialogue component props
@@ -117,6 +135,27 @@ export interface PortraitProps {
   status?: 'friendly' | 'neutral' | 'hostile';
 }
 
+// Transcript entry
+export interface TranscriptEntry {
+  speaker: string;
+  text: string;
+  timestamp?: number;
+  avatarUrl?: string;
+  speakerColor?: string;
+}
+
+// Transcript component props - live-updating multi-speaker conversation
+export interface TranscriptProps {
+  title?: string;
+  entries: TranscriptEntry[];
+  inputEnabled?: boolean;
+  inputPlaceholder?: string;
+  inputButtonText?: string;
+  showTimestamps?: boolean;
+  maxHeight?: number;
+  autoScroll?: boolean;
+}
+
 // Component type registry
 export type ComponentType =
   | 'dialogue'
@@ -124,7 +163,8 @@ export type ComponentType =
   | 'combat'
   | 'diceRoll'
   | 'resourceBar'
-  | 'portrait';
+  | 'portrait'
+  | 'transcript';
 
 export type ComponentProps =
   | DialogueProps
@@ -132,4 +172,5 @@ export type ComponentProps =
   | CombatProps
   | DiceRollProps
   | ResourceBarProps
-  | PortraitProps;
+  | PortraitProps
+  | TranscriptProps;

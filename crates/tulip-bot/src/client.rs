@@ -271,6 +271,96 @@ impl TulipClient {
         }
     }
 
+    /// Send a response to a stream by ID (used when we only have stream_id, not name)
+    pub async fn send_response_to_stream_id(
+        &self,
+        stream_id: i64,
+        topic: &str,
+        response: &Response,
+    ) -> Result<Option<i64>> {
+        if response.is_empty() {
+            return Ok(None);
+        }
+
+        let content = response.content().unwrap_or("");
+
+        // Use stream ID directly - Tulip/Zulip accepts either name or ID
+        let id = self.send_message_to_stream_id(stream_id, topic, content).await?;
+        Ok(Some(id))
+    }
+
+    /// Send a message to a stream by ID
+    pub async fn send_message_to_stream_id(
+        &self,
+        stream_id: i64,
+        topic: &str,
+        content: &str,
+    ) -> Result<i64> {
+        let url = format!("{}/api/v1/messages", self.config.site);
+
+        let mut params = HashMap::new();
+        params.insert("type", "stream".to_string());
+        params.insert("to", stream_id.to_string());
+        params.insert("topic", topic.to_string());
+        params.insert("content", content.to_string());
+
+        trace!("Sending message to stream_id={}/{}: {}", stream_id, topic, content);
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to send message ({}): {}",
+                status, text
+            )));
+        }
+
+        let resp: SendMessageResponse = response.json().await?;
+        debug!("Message sent to stream_id={}/{}, id={}", stream_id, topic, resp.id);
+        Ok(resp.id)
+    }
+
+    /// Send a private/direct message to a user
+    pub async fn send_private_message(&self, user_id: i64, content: &str) -> Result<i64> {
+        let url = format!("{}/api/v1/messages", self.config.site);
+
+        let mut params = HashMap::new();
+        params.insert("type", "private".to_string());
+        params.insert("to", format!("[{}]", user_id));
+        params.insert("content", content.to_string());
+
+        trace!("Sending private message to user_id={}: {}", user_id, content);
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to send private message ({}): {}",
+                status, text
+            )));
+        }
+
+        let resp: SendMessageResponse = response.json().await?;
+        debug!("Private message sent to user_id={}, id={}", user_id, resp.id);
+        Ok(resp.id)
+    }
+
     /// Add a reaction emoji to a message
     pub async fn add_reaction(&self, message_id: i64, emoji_name: &str) -> Result<()> {
         let url = format!(
@@ -533,5 +623,66 @@ impl TulipClient {
 
         // Return full URL (uri is relative like /user_uploads/...)
         Ok(format!("{}{}", self.config.site, data.uri))
+    }
+
+    /// Add a submessage to an existing message.
+    ///
+    /// Submessages are used for live-updating widgets like transcripts.
+    /// The content is JSON-encoded and stored with the specified msg_type.
+    pub async fn add_submessage(
+        &self,
+        message_id: i64,
+        msg_type: &str,
+        content: &serde_json::Value,
+    ) -> Result<()> {
+        let url = format!("{}/json/submessage", self.config.site);
+
+        let mut params = HashMap::new();
+        params.insert("message_id", message_id.to_string());
+        params.insert("msg_type", msg_type.to_string());
+        params.insert("content", serde_json::to_string(content)?);
+
+        trace!("Adding submessage to message {}: {:?}", message_id, content);
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to add submessage ({}): {}",
+                status, text
+            )));
+        }
+
+        debug!("Added submessage to message {}", message_id);
+        Ok(())
+    }
+
+    /// Add a transcript entry to an existing transcript widget.
+    ///
+    /// This is a convenience method that wraps add_submessage with the
+    /// correct msg_type for transcript entries.
+    pub async fn add_transcript_entry(
+        &self,
+        message_id: i64,
+        entry: &crate::widget::TranscriptEntry,
+    ) -> Result<()> {
+        let content = serde_json::json!({
+            "type": "transcript_entry",
+            "speaker": entry.speaker,
+            "text": entry.text,
+            "timestamp": entry.timestamp,
+            "avatarUrl": entry.avatar_url,
+            "speakerColor": entry.speaker_color,
+        });
+
+        self.add_submessage(message_id, "widget", &content).await
     }
 }

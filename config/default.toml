@@ -30,6 +30,7 @@ default_height = 720
 # answer was affirmative. If so, responds as a puppet character.
 [ctc_detector]
 puppet_name = "Cinnamon Toast Crunch Detective"
+channel = "general"
 
 [ctc_detector.question_model]
 model_id = "Qwen/Qwen3-1.7B"

@@ -43,6 +43,9 @@ struct CtcDetectorConfig {
     /// Optional puppet avatar URL
     #[serde(default)]
     puppet_avatar_url: Option<String>,
+    /// Optional channel to restrict detection to (if not set, runs on all channels)
+    #[serde(default)]
+    channel: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -114,6 +117,7 @@ struct CtcDetectorData {
     evaluator_config: ModelConfig,
     puppet_name: String,
     puppet_avatar_url: Option<String>,
+    channel: Option<String>,
 }
 
 /// /debate command - start a new debate
@@ -584,28 +588,37 @@ async fn handle_combined_message(ctx: MessageContext<'_, BotData>) -> tulip_bot:
     let spween_data = &ctx.data.spweencraft;
     let rhai_games = &ctx.data.rhai_games;
 
-    // Run CTC detector in background on all messages (doesn't block other handlers)
-    // We spawn it so it doesn't interfere with the normal message flow
-    if ctx.data.ctc_detector.is_some() {
-        let ctc_ctx_channel = ctx.channel().to_string();
-        let ctc_ctx_topic = topic.to_string();
-        let ctc_ctx_content = content.to_string();
-        let ctc_ctx_message_id = ctx.message.id;
-        let ctc_ctx_client = ctx.client.clone();
-        let ctc_data = ctx.data.ctc_detector.as_ref().unwrap().clone();
+    // Run CTC detector in background (doesn't block other handlers)
+    // Only runs if configured and channel matches (or no channel restriction)
+    if let Some(ctc_data) = &ctx.data.ctc_detector {
+        let should_run = ctc_data
+            .channel
+            .as_ref()
+            .map_or(true, |ch| ch == ctx.channel());
 
-        tokio::spawn(async move {
-            if let Err(e) = run_ctc_detector_background(
-                &ctc_ctx_channel,
-                &ctc_ctx_topic,
-                &ctc_ctx_content,
-                ctc_ctx_message_id,
-                &ctc_ctx_client,
-                &ctc_data,
-            ).await {
-                tracing::error!("CTC detector error: {}", e);
-            }
-        });
+        if should_run {
+            let ctc_ctx_channel = ctx.channel().to_string();
+            let ctc_ctx_topic = topic.to_string();
+            let ctc_ctx_content = content.to_string();
+            let ctc_ctx_message_id = ctx.message.id;
+            let ctc_ctx_client = ctx.client.clone();
+            let ctc_data = ctc_data.clone();
+
+            tokio::spawn(async move {
+                if let Err(e) = run_ctc_detector_background(
+                    &ctc_ctx_channel,
+                    &ctc_ctx_topic,
+                    &ctc_ctx_content,
+                    ctc_ctx_message_id,
+                    &ctc_ctx_client,
+                    &ctc_data,
+                )
+                .await
+                {
+                    tracing::error!("CTC detector error: {}", e);
+                }
+            });
+        }
     }
 
     // Priority 1: Check for active Rhai game session
@@ -1126,8 +1139,9 @@ async fn main() -> anyhow::Result<()> {
     // Create CTC detector data if configured
     let ctc_detector = app_config.ctc_detector.map(|config| {
         info!(
-            "CTC Detector enabled with puppet '{}'",
-            config.puppet_name
+            "CTC Detector enabled with puppet '{}' (channel: {:?})",
+            config.puppet_name,
+            config.channel
         );
         CtcDetectorData {
             question_model: Arc::new(RwLock::new(None)),
@@ -1136,6 +1150,7 @@ async fn main() -> anyhow::Result<()> {
             evaluator_config: config.evaluator_model,
             puppet_name: config.puppet_name,
             puppet_avatar_url: config.puppet_avatar_url,
+            channel: config.channel,
         }
     });
 

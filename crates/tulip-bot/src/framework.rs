@@ -2,7 +2,7 @@
 
 use crate::client::TulipClient;
 use crate::command::Command;
-use crate::context::{Args, AutocompleteContext, CommandContext, InteractionContext, MessageContext};
+use crate::context::{Args, AutocompleteContext, CommandContext, CommandInvocationContext, InteractionContext, MessageContext};
 use crate::error::{Result, TulipError};
 use crate::interaction::{Interaction, InteractionHandler};
 use crate::response::Response;
@@ -54,8 +54,8 @@ impl<D: Send + Sync + 'static> Framework<D> {
 
     /// Run the bot (main event loop)
     pub async fn run(&self) -> Result<()> {
-        // Register for message and interaction events
-        let event_types = ["message", "bot_interaction"];
+        // Register for message, interaction, command invocation, and submessage events
+        let event_types = ["message", "bot_interaction", "command_invocation", "submessage"];
         let (mut queue_id, mut last_event_id) = self.client.register_queue(&event_types).await?;
 
         info!("Framework running, listening for events...");
@@ -112,8 +112,42 @@ impl<D: Send + Sync + 'static> Framework<D> {
                         &autocomplete.option,
                         &autocomplete.partial,
                         &autocomplete.user,
+                        &autocomplete.context,
                     )
                     .await;
+                }
+            }
+            "command_invocation" => {
+                // Command invocation from the UI (slash command)
+                if let (Some(command), Some(interaction_id), Some(message_id), Some(user)) = (
+                    event.command.as_ref(),
+                    event.interaction_id.as_ref(),
+                    event.message_id,
+                    event.user.as_ref(),
+                ) {
+                    let arguments = event.arguments.clone().unwrap_or_default();
+                    let (stream_id, topic) = event
+                        .context
+                        .as_ref()
+                        .map(|ctx| (ctx.stream_id, ctx.topic.as_deref()))
+                        .unwrap_or((None, None));
+
+                    self.handle_command_invocation(
+                        command,
+                        arguments,
+                        interaction_id,
+                        message_id,
+                        user,
+                        stream_id,
+                        topic,
+                    )
+                    .await;
+                }
+            }
+            "submessage" => {
+                // Submessage added to a message (for live-updating widgets like transcripts)
+                if let Some(submessage) = event.submessage {
+                    self.handle_submessage(submessage).await;
                 }
             }
             _ => {
@@ -265,6 +299,7 @@ impl<D: Send + Sync + 'static> Framework<D> {
         option: &str,
         partial: &str,
         user: &crate::types::User,
+        context: &serde_json::Value,
     ) {
         debug!(
             "Autocomplete request for /{} option {} partial '{}'",
@@ -280,6 +315,7 @@ impl<D: Send + Sync + 'static> Framework<D> {
                     option,
                     partial,
                     user,
+                    context,
                     &self.client,
                     self.data.as_ref(),
                 );
@@ -296,6 +332,98 @@ impl<D: Send + Sync + 'static> Framework<D> {
                 return;
             }
         }
+    }
+
+    async fn handle_command_invocation(
+        &self,
+        command: &str,
+        arguments: std::collections::HashMap<String, String>,
+        interaction_id: &str,
+        message_id: i64,
+        user: &crate::types::User,
+        stream_id: Option<i64>,
+        topic: Option<&str>,
+    ) {
+        debug!(
+            "Command invocation /{} from {} with {} args",
+            command,
+            user.full_name,
+            arguments.len()
+        );
+
+        // Find matching command
+        for cmd in &self.commands {
+            let def = cmd.definition();
+            if def.name == command {
+                // Convert arguments HashMap to Args
+                let args = Args::new(arguments);
+
+                let ctx = CommandInvocationContext::new(
+                    command,
+                    args,
+                    interaction_id,
+                    message_id,
+                    user,
+                    stream_id,
+                    topic,
+                    &self.client,
+                    self.data.as_ref(),
+                );
+
+                match cmd.execute_invocation(ctx).await {
+                    Ok(response) => {
+                        if !response.is_empty() {
+                            // Send response to the same location
+                            if let (Some(stream_id), Some(topic)) = (stream_id, topic) {
+                                if let Err(e) = self
+                                    .client
+                                    .send_response_to_stream_id(stream_id, topic, &response)
+                                    .await
+                                {
+                                    error!("Failed to send command invocation response: {}", e);
+                                }
+                            } else {
+                                // DM response
+                                if let Some(content) = response.content() {
+                                    if let Err(e) = self.client.send_private_message(user.id, content).await {
+                                        error!("Failed to send private response: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Command invocation {} failed: {}", command, e);
+                        // Send error response
+                        let error_msg = format!("Error: {}", e);
+                        if let (Some(stream_id), Some(topic)) = (stream_id, topic) {
+                            let _ = self.client.send_message_to_stream_id(stream_id, topic, &error_msg).await;
+                        } else {
+                            let _ = self.client.send_private_message(user.id, &error_msg).await;
+                        }
+                    }
+                }
+                return;
+            }
+        }
+
+        warn!("Unknown command invocation: /{}", command);
+    }
+
+    async fn handle_submessage(&self, submessage: crate::types::SubMessageEvent) {
+        // Log submessage events for debugging
+        // Bots can use this to react to transcript entries, etc.
+        trace!(
+            "Submessage {} on message {} from sender {}: type={}, content={:?}",
+            submessage.submessage_id,
+            submessage.message_id,
+            submessage.sender_id,
+            submessage.msg_type,
+            submessage.content
+        );
+
+        // For now, just log - bots can override behavior by subscribing to submessage events
+        // Future: Add submessage handlers similar to interaction handlers
     }
 }
 
