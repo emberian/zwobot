@@ -1,0 +1,665 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tulip Game Widgets Playground</title>
+  <link rel="stylesheet" href="../game-widgets/dist/style.css">
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0f0f0f;
+      color: #e0e0e0;
+      margin: 0;
+      padding: 20px;
+      min-height: 100vh;
+    }
+
+    .playground {
+      max-width: 1400px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: 350px 1fr;
+      gap: 24px;
+    }
+
+    h1 {
+      grid-column: 1 / -1;
+      margin: 0 0 16px 0;
+      font-size: 24px;
+      color: #fff;
+    }
+
+    h1 span {
+      color: #8b5cf6;
+    }
+
+    .controls {
+      background: #1a1a1a;
+      border-radius: 12px;
+      padding: 20px;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .control-group label {
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #888;
+    }
+
+    input[type="text"], textarea, select {
+      background: #2a2a2a;
+      border: 1px solid #3a3a3a;
+      border-radius: 8px;
+      padding: 10px 12px;
+      color: #fff;
+      font-size: 14px;
+      font-family: inherit;
+    }
+
+    textarea {
+      min-height: 80px;
+      resize: vertical;
+    }
+
+    input[type="text"]:focus, textarea:focus, select:focus {
+      outline: none;
+      border-color: #8b5cf6;
+    }
+
+    .button-row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      background: #8b5cf6;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 16px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: #7c3aed;
+    }
+
+    button.secondary {
+      background: #3a3a3a;
+    }
+
+    button.secondary:hover {
+      background: #4a4a4a;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .preview-area {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .preview-card {
+      background: #1a1a1a;
+      border-radius: 12px;
+      padding: 24px;
+    }
+
+    .preview-card h2 {
+      margin: 0 0 16px 0;
+      font-size: 14px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: #888;
+    }
+
+    #widget-container {
+      min-height: 200px;
+    }
+
+    #json-output {
+      background: #0a0a0a;
+      border-radius: 8px;
+      padding: 16px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 12px;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .demo-section {
+      border-top: 1px solid #2a2a2a;
+      padding-top: 16px;
+      margin-top: 8px;
+    }
+
+    .demo-section h3 {
+      margin: 0 0 12px 0;
+      font-size: 13px;
+      font-weight: 600;
+      color: #aaa;
+    }
+
+    .mood-buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .mood-buttons button {
+      padding: 6px 12px;
+      font-size: 12px;
+    }
+
+    .status {
+      font-size: 12px;
+      color: #666;
+      margin-top: 8px;
+    }
+
+    .status.success {
+      color: #22c55e;
+    }
+
+    .status.error {
+      color: #ef4444;
+    }
+
+    .interaction-log {
+      background: #0a0a0a;
+      border-radius: 8px;
+      padding: 12px;
+      font-family: 'Monaco', 'Menlo', monospace;
+      font-size: 11px;
+      max-height: 150px;
+      overflow-y: auto;
+    }
+
+    .interaction-log .entry {
+      padding: 4px 0;
+      border-bottom: 1px solid #1a1a1a;
+    }
+
+    .interaction-log .entry:last-child {
+      border-bottom: none;
+    }
+
+    .interaction-log .type {
+      color: #8b5cf6;
+    }
+
+    .interaction-log .data {
+      color: #888;
+    }
+  </style>
+</head>
+<body>
+  <div class="playground">
+    <h1>Tulip <span>Game Widgets</span> Playground</h1>
+
+    <div class="controls">
+      <div class="control-group">
+        <label>Speaker Name</label>
+        <input type="text" id="speaker-name" value="Village Elder" />
+      </div>
+
+      <div class="control-group">
+        <label>Portrait URL (optional)</label>
+        <input type="text" id="portrait-url" value="https://api.dicebear.com/7.x/personas/svg?seed=elder" />
+      </div>
+
+      <div class="control-group">
+        <label>Dialogue Text</label>
+        <textarea id="dialogue-text">Greetings, traveler. What brings you to our village?</textarea>
+      </div>
+
+      <div class="control-group">
+        <label>Mood</label>
+        <select id="mood">
+          <option value="">Neutral</option>
+          <option value="happy">Happy</option>
+          <option value="angry">Angry</option>
+          <option value="sad">Sad</option>
+          <option value="surprised">Surprised</option>
+        </select>
+      </div>
+
+      <div class="button-row">
+        <button id="render-btn">Render Widget</button>
+        <button id="render-choices-btn" class="secondary">With Choices</button>
+        <button id="render-history-btn" class="secondary">With History</button>
+      </div>
+
+      <div class="demo-section">
+        <h3>Quick Mood Demo</h3>
+        <div class="mood-buttons">
+          <button data-mood="happy">Happy</button>
+          <button data-mood="angry">Angry</button>
+          <button data-mood="sad">Sad</button>
+          <button data-mood="surprised">Surprised</button>
+          <button data-mood="">Neutral</button>
+        </div>
+      </div>
+
+      <div class="demo-section">
+        <h3>Conversation Demo</h3>
+        <div class="button-row">
+          <button id="conv-prev" class="secondary" disabled>&larr; Prev</button>
+          <button id="conv-next" class="secondary">Next &rarr;</button>
+          <button id="conv-reset" class="secondary">Reset</button>
+        </div>
+        <div class="status" id="conv-status">Step 1 of 4</div>
+      </div>
+
+      <div class="demo-section">
+        <h3>Edge Case Tests</h3>
+        <div class="button-row">
+          <button id="test-no-speaker" class="secondary">No Speaker</button>
+          <button id="test-long-text" class="secondary">Long Text</button>
+          <button id="test-special-chars" class="secondary">Special Chars</button>
+          <button id="test-markdown" class="secondary">Markdown</button>
+        </div>
+      </div>
+
+      <div class="demo-section">
+        <h3>Widget Lifecycle</h3>
+        <div class="button-row">
+          <button id="test-update" class="secondary">Test Update</button>
+          <button id="test-unmount" class="secondary">Unmount</button>
+          <button id="test-remount" class="secondary">Re-mount</button>
+        </div>
+      </div>
+
+      <div class="demo-section">
+        <h3>Disabled Choices</h3>
+        <div class="button-row">
+          <button id="test-disabled" class="secondary">Show Disabled</button>
+          <button id="test-requirements" class="secondary">Requirements</button>
+        </div>
+      </div>
+
+      <div id="status" class="status"></div>
+    </div>
+
+    <div class="preview-area">
+      <div class="preview-card">
+        <h2>Widget Preview</h2>
+        <div id="widget-container"></div>
+      </div>
+
+      <div class="preview-card">
+        <h2>Interaction Log</h2>
+        <div id="interaction-log" class="interaction-log">
+          <div class="entry"><span class="type">info</span> <span class="data">Waiting for interactions...</span></div>
+        </div>
+      </div>
+
+      <div class="preview-card">
+        <h2>Generated Freeform Widget JSON</h2>
+        <pre id="json-output">Click "Render Widget" to see the generated JSON</pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="../game-widgets/dist/tulip-game-widgets.js"></script>
+  <script type="module">
+    // Import WASM module
+    import init, {
+      create_simple_dialogue,
+      create_dialogue_with_choices,
+      create_dialogue_with_history,
+      create_dialogue_with_mood,
+      get_dialogue_props,
+      get_dependencies,
+      ConversationDemo,
+    } from './pkg/playground_wasm.js';
+
+    let wasmReady = false;
+    let conversationDemo = null;
+
+    const container = document.getElementById('widget-container');
+    const jsonOutput = document.getElementById('json-output');
+    const statusEl = document.getElementById('status');
+    const interactionLog = document.getElementById('interaction-log');
+
+    // Mock widget context
+    const ctx = {
+      message_id: 12345,
+      post_interaction: (data) => {
+        logInteraction('interaction', data);
+        console.log('Interaction:', data);
+      },
+      on: (event, selector, handler) => {
+        console.log('Event binding:', event, selector);
+      },
+      update_html: (html) => {
+        console.log('Update HTML:', html);
+      },
+    };
+
+    function logInteraction(type, data) {
+      const entry = document.createElement('div');
+      entry.className = 'entry';
+      entry.innerHTML = `<span class="type">${type}</span> <span class="data">${JSON.stringify(data)}</span>`;
+      interactionLog.insertBefore(entry, interactionLog.firstChild);
+    }
+
+    function setStatus(message, isError = false) {
+      statusEl.textContent = message;
+      statusEl.className = 'status ' + (isError ? 'error' : 'success');
+    }
+
+    function renderWidget(freeformData) {
+      // Extract the props from the JS code
+      const jsMatch = freeformData.js?.match(/TulipWidgets\.render\([^,]+,\s*'([^']+)',\s*(\{.*\}),\s*ctx\)/s);
+
+      if (jsMatch) {
+        const componentType = jsMatch[1];
+        const propsJson = jsMatch[2];
+        const props = JSON.parse(propsJson);
+
+        // Render using TulipWidgets
+        if (window.TulipWidgets) {
+          window.TulipWidgets.render(container, componentType, props, ctx);
+          setStatus('Widget rendered successfully');
+        } else {
+          setStatus('TulipWidgets not loaded', true);
+        }
+      } else {
+        setStatus('Could not parse widget JS', true);
+      }
+
+      // Show JSON
+      jsonOutput.textContent = JSON.stringify(freeformData, null, 2);
+    }
+
+    function renderDialogueProps(props) {
+      if (window.TulipWidgets) {
+        window.TulipWidgets.render(container, 'dialogue', props, ctx);
+        setStatus('Widget rendered successfully');
+      }
+      jsonOutput.textContent = JSON.stringify(props, null, 2);
+    }
+
+    // Initialize WASM
+    init().then(() => {
+      wasmReady = true;
+      conversationDemo = new ConversationDemo();
+      setStatus('WASM initialized, ready to render');
+
+      // Enable buttons
+      document.querySelectorAll('button').forEach(btn => btn.disabled = false);
+    }).catch(err => {
+      setStatus('Failed to load WASM: ' + err.message, true);
+    });
+
+    // Event handlers
+    document.getElementById('render-btn').addEventListener('click', () => {
+      if (!wasmReady) return;
+
+      const text = document.getElementById('dialogue-text').value;
+      const speaker = document.getElementById('speaker-name').value;
+      const portrait = document.getElementById('portrait-url').value || null;
+      const mood = document.getElementById('mood').value || null;
+
+      const props = get_dialogue_props(text, speaker, portrait, mood);
+      renderDialogueProps(props);
+    });
+
+    document.getElementById('render-choices-btn').addEventListener('click', () => {
+      if (!wasmReady) return;
+
+      const text = document.getElementById('dialogue-text').value;
+      const speaker = document.getElementById('speaker-name').value;
+      const portrait = document.getElementById('portrait-url').value || undefined;
+
+      const freeform = create_dialogue_with_choices(text, speaker, portrait);
+      renderWidget(freeform);
+    });
+
+    document.getElementById('render-history-btn').addEventListener('click', () => {
+      if (!wasmReady) return;
+
+      const freeform = create_dialogue_with_history();
+      renderWidget(freeform);
+    });
+
+    // Mood demo buttons
+    document.querySelectorAll('.mood-buttons button').forEach(btn => {
+      btn.addEventListener('click', () => {
+        if (!wasmReady) return;
+        const mood = btn.dataset.mood;
+        const freeform = create_dialogue_with_mood(mood);
+        renderWidget(freeform);
+      });
+    });
+
+    // Conversation demo
+    function updateConversationStatus() {
+      if (!conversationDemo) return;
+      const step = conversationDemo.step();
+      document.getElementById('conv-status').textContent = `Step ${step + 1} of 4`;
+      document.getElementById('conv-prev').disabled = step === 0;
+    }
+
+    document.getElementById('conv-next').addEventListener('click', () => {
+      if (!conversationDemo) return;
+      conversationDemo.next();
+      const props = conversationDemo.current();
+      renderDialogueProps(props);
+      updateConversationStatus();
+    });
+
+    document.getElementById('conv-prev').addEventListener('click', () => {
+      if (!conversationDemo) return;
+      conversationDemo.prev();
+      const props = conversationDemo.current();
+      renderDialogueProps(props);
+      updateConversationStatus();
+    });
+
+    document.getElementById('conv-reset').addEventListener('click', () => {
+      if (!conversationDemo) return;
+      conversationDemo.reset();
+      const props = conversationDemo.current();
+      renderDialogueProps(props);
+      updateConversationStatus();
+    });
+
+    // Edge case tests
+    document.getElementById('test-no-speaker').addEventListener('click', () => {
+      const props = {
+        text: "A mysterious voice echoes through the chamber. You cannot see who is speaking.",
+        choices: [
+          { label: "Call out", customId: "call" },
+          { label: "Stay silent", customId: "silent" },
+        ],
+      };
+      renderDialogueProps(props);
+      logInteraction('test', 'No speaker - testing anonymous dialogue');
+    });
+
+    document.getElementById('test-long-text').addEventListener('click', () => {
+      const longText = `The ancient tome lies open before you, its pages yellowed with age and covered in cramped, spidery handwriting. As you lean closer to read, the words seem to swim before your eyes, forming and reforming into different languages - some you recognize, others completely alien.
+
+"The Dragon of the Northern Wastes," the text begins, "was not always a creature of destruction. In the Age Before Memory, when the world was young and the gods still walked among mortals, the dragon was a guardian - a keeper of sacred knowledge and protector of the innocent."
+
+The narrative continues for several more paragraphs, detailing battles fought, kingdoms risen and fallen, and the slow corruption that turned the guardian into a terror. You realize this isn't just a story - it's a warning.`;
+
+      const props = {
+        speaker: {
+          name: "The Ancient Text",
+          mood: "neutral",
+        },
+        text: longText,
+        continueCustomId: "continue_reading",
+      };
+      renderDialogueProps(props);
+      logInteraction('test', 'Long text - testing text overflow and scrolling');
+    });
+
+    document.getElementById('test-special-chars').addEventListener('click', () => {
+      const props = {
+        speaker: {
+          name: "Ælf'rēd the Wïse",
+          portraitUrl: "https://api.dicebear.com/7.x/personas/svg?seed=special",
+          mood: "surprised",
+        },
+        text: "「こんにちは」— The stranger speaks in tongues unknown. *Emphasis* and **strong emphasis**. Special: <script>alert('xss')</script> & \"quotes\" & 'apostrophes'. Math: 2 + 2 = 4. Currency: $100 / €85 / £70",
+        choices: [
+          { label: "Respond: \"Greetings!\"", customId: "greet" },
+          { label: "Say: <nothing>", customId: "nothing" },
+          { label: "Use emoji 🗡️", customId: "emoji" },
+        ],
+      };
+      renderDialogueProps(props);
+      logInteraction('test', 'Special characters - testing escaping and Unicode');
+    });
+
+    document.getElementById('test-markdown').addEventListener('click', () => {
+      const props = {
+        speaker: {
+          name: "Tutorial Guide",
+          portraitUrl: "https://api.dicebear.com/7.x/personas/svg?seed=guide",
+          mood: "happy",
+        },
+        text: `Welcome to the **Tulip Game System**!
+
+Here's what you can do:
+- *Explore* mysterious dungeons
+- **Fight** fearsome monsters
+- ~~Die horribly~~ Achieve victory!
+
+> "The journey of a thousand miles begins with a single step."
+
+Press continue to begin your adventure.`,
+        continueCustomId: "begin",
+      };
+      renderDialogueProps(props);
+      logInteraction('test', 'Markdown - testing text formatting (if supported)');
+    });
+
+    // Widget lifecycle tests
+    let updateCounter = 0;
+    document.getElementById('test-update').addEventListener('click', () => {
+      updateCounter++;
+      const moods = ['neutral', 'happy', 'angry', 'sad', 'surprised'];
+      const mood = moods[updateCounter % moods.length];
+
+      const props = {
+        speaker: {
+          name: "Mood Tester",
+          portraitUrl: "https://api.dicebear.com/7.x/personas/svg?seed=tester",
+          mood: mood,
+        },
+        text: `Update #${updateCounter}: Testing React re-render. Current mood: ${mood}. Click again to cycle moods.`,
+        continueCustomId: "next_update",
+      };
+
+      // Use TulipWidgets.update if available, otherwise render
+      if (window.TulipWidgets?.update) {
+        window.TulipWidgets.update(container, props);
+        setStatus(`Widget updated (update #${updateCounter})`);
+      } else {
+        window.TulipWidgets.render(container, 'dialogue', props, ctx);
+        setStatus(`Widget re-rendered (update #${updateCounter})`);
+      }
+      jsonOutput.textContent = JSON.stringify(props, null, 2);
+      logInteraction('lifecycle', `Update #${updateCounter}, mood: ${mood}`);
+    });
+
+    document.getElementById('test-unmount').addEventListener('click', () => {
+      if (window.TulipWidgets?.unmount) {
+        window.TulipWidgets.unmount(container);
+        setStatus('Widget unmounted');
+      } else {
+        container.innerHTML = '';
+        setStatus('Container cleared (unmount not available)');
+      }
+      jsonOutput.textContent = '// Widget unmounted';
+      logInteraction('lifecycle', 'Unmount requested');
+    });
+
+    document.getElementById('test-remount').addEventListener('click', () => {
+      const props = {
+        speaker: {
+          name: "Re-mounted Widget",
+          portraitUrl: "https://api.dicebear.com/7.x/personas/svg?seed=remount",
+          mood: "happy",
+        },
+        text: "This widget was unmounted and then re-mounted. The React tree was recreated from scratch.",
+        continueCustomId: "ok",
+      };
+      renderDialogueProps(props);
+      logInteraction('lifecycle', 'Re-mount after unmount');
+    });
+
+    // Disabled choices tests
+    document.getElementById('test-disabled').addEventListener('click', () => {
+      const props = {
+        speaker: {
+          name: "Merchant",
+          portraitUrl: "https://api.dicebear.com/7.x/personas/svg?seed=merchant",
+          mood: "neutral",
+        },
+        text: "Welcome to my shop! What would you like to purchase?",
+        choices: [
+          { label: "Buy Health Potion (10g)", customId: "buy_health" },
+          { label: "Buy Mana Potion (15g)", customId: "buy_mana" },
+          { label: "Buy Epic Sword (1000g)", customId: "buy_sword", disabled: true },
+          { label: "Leave", customId: "leave" },
+        ],
+      };
+      renderDialogueProps(props);
+      logInteraction('test', 'Disabled choices - some options unavailable');
+    });
+
+    document.getElementById('test-requirements').addEventListener('click', () => {
+      const props = {
+        speaker: {
+          name: "Castle Guard",
+          portraitUrl: "https://api.dicebear.com/7.x/personas/svg?seed=guard",
+          mood: "angry",
+        },
+        text: "Halt! None may pass without proving their worth.",
+        choices: [
+          { label: "Show royal seal", customId: "seal" },
+          { label: "Bribe the guard", customId: "bribe", disabled: true, requirementText: "[Requires 50 Gold]" },
+          { label: "Intimidate", customId: "intimidate", disabled: true, requirementText: "[Requires 15 STR]" },
+          { label: "Persuade", customId: "persuade", disabled: true, requirementText: "[Requires 14 CHA]" },
+          { label: "Sneak past", customId: "sneak", disabled: true, requirementText: "[Requires 16 DEX]" },
+        ],
+      };
+      renderDialogueProps(props);
+      logInteraction('test', 'Requirements - showing why choices are disabled');
+    });
+  </script>
+</body>
+</html>

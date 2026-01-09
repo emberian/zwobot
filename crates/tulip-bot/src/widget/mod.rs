@@ -5,10 +5,12 @@
 mod embed;
 mod component;
 mod freeform;
+mod game;
 
 pub use embed::*;
 pub use component::*;
 pub use freeform::*;
+pub use game::*;
 
 use serde::Serialize;
 

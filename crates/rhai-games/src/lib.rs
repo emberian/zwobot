@@ -9,18 +9,25 @@ mod loader;
 mod session;
 mod bridge;
 pub mod api;
+pub mod persistence;
+pub mod shared_state;
+pub mod timer;
 
 pub use engine::RhaiEngine;
 pub use script::{GameScript, ScriptMeta, CommandMeta, OptionMeta};
 pub use loader::ScriptLoader;
 pub use session::GameSession;
 pub use bridge::{AsyncBridge, AsyncRequest, LlmConfig};
+pub use persistence::PersistenceManager;
+pub use shared_state::SharedState;
+pub use timer::TimerManager;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
-use tracing::info;
+use tracing::{info, debug, error};
 
 /// Error types for the rhai-games crate
 #[derive(Debug, thiserror::Error)]
@@ -66,15 +73,33 @@ pub struct RhaiGamesData {
     pub sessions: Arc<RwLock<HashMap<String, GameSession>>>,
     /// Async bridge sender for LLM calls
     bridge_tx: mpsc::Sender<AsyncRequest>,
+    /// Timer manager
+    pub timers: Arc<TimerManager>,
+    /// Persistence manager
+    pub persistence: Arc<PersistenceManager>,
+    /// Shared state manager
+    pub shared_state: Arc<SharedState>,
 }
 
 impl RhaiGamesData {
     /// Create a new RhaiGamesData instance
     pub async fn new(scripts_dir: impl Into<PathBuf>) -> Result<Self> {
-        let scripts_dir = scripts_dir.into();
+        Self::with_data_dir(scripts_dir, "data/rhai-games").await
+    }
 
-        // Create async bridge
-        let (bridge, bridge_tx) = AsyncBridge::new();
+    /// Create with custom data directory
+    pub async fn with_data_dir(
+        scripts_dir: impl Into<PathBuf>,
+        data_dir: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let scripts_dir = scripts_dir.into();
+        let data_dir = data_dir.into();
+
+        // Create persistence manager
+        let persistence = Arc::new(PersistenceManager::new(&data_dir));
+
+        // Create async bridge with persistence
+        let (bridge, bridge_tx) = AsyncBridge::new(persistence.clone());
 
         // Create engine with bridge
         let engine = Arc::new(RhaiEngine::new(bridge_tx.clone()));
@@ -82,19 +107,114 @@ impl RhaiGamesData {
         // Create script loader
         let loader = Arc::new(ScriptLoader::new(scripts_dir));
 
+        // Create timer manager
+        let timers = Arc::new(TimerManager::new());
+
+        // Create shared state manager with persistence
+        let shared_state = Arc::new(SharedState::new(Some(persistence.clone())));
+
         // Start async bridge in background
         tokio::spawn(bridge.run());
+
+        // Load persisted shared state
+        if let Err(e) = shared_state.load_persisted().await {
+            debug!("Could not load persisted shared state: {}", e);
+        }
 
         // Load all scripts
         let count = loader.load_all(&engine).await?;
         info!("Loaded {} Rhai game scripts", count);
 
-        Ok(Self {
+        let data = Self {
             loader,
             engine,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             bridge_tx,
-        })
+            timers,
+            persistence,
+            shared_state,
+        };
+
+        Ok(data)
+    }
+
+    /// Start the timer tick loop (should be spawned as a background task)
+    pub fn start_timer_loop(self: &Arc<Self>) {
+        let data = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(100));
+            loop {
+                interval.tick().await;
+                if let Err(e) = data.process_timers().await {
+                    error!("Timer processing error: {}", e);
+                }
+            }
+        });
+    }
+
+    /// Process ready timers
+    async fn process_timers(&self) -> Result<()> {
+        let ready_timers = self.timers.collect_ready().await;
+
+        for timer in ready_timers {
+            debug!("Firing timer {} for topic {}", timer.id, timer.topic);
+
+            // Get the script for this timer
+            let script = match self.loader.get(&timer.script_id).await {
+                Some(s) => s,
+                None => {
+                    debug!("Script {} not found for timer", timer.script_id);
+                    continue;
+                }
+            };
+
+            // Check if script has on_timer handler
+            let has_handler = script.ast.iter_functions().any(|f| f.name == "on_timer");
+            if !has_handler {
+                debug!("Script {} has no on_timer handler", timer.script_id);
+                continue;
+            }
+
+            // Create minimal execution context for timer callback
+            let ctx = api::ExecutionContext {
+                topic: timer.topic.clone(),
+                channel: String::new(),
+                sender_name: String::new(),
+                sender_id: 0,
+                content: String::new(),
+                args: {
+                    let mut args = HashMap::new();
+                    args.insert("timer_id".to_string(), timer.id.to_string());
+                    // Store context as JSON string for script to parse
+                    if let Ok(json) = serde_json::to_string(&persistence::dynamic_to_json(&timer.context)) {
+                        args.insert("timer_context".to_string(), json);
+                    }
+                    args
+                },
+            };
+
+            // Execute the on_timer handler
+            match self.engine.call_script_fn(
+                &script,
+                &self.sessions,
+                &timer.topic,
+                "on_timer",
+                &ctx,
+                &self.bridge_tx,
+            ).await {
+                Ok(response) => {
+                    if let Some(resp) = response {
+                        debug!("Timer {} produced response: {:?}", timer.id, resp.content);
+                        // Timer responses could be sent to a channel here if needed
+                    }
+                }
+                Err(e) => {
+                    error!("Timer {} handler error: {}", timer.id, e);
+                }
+            }
+        }
+
+        Ok(())
     }
 
     /// Get all commands from all loaded scripts (for registration)
@@ -127,19 +247,29 @@ impl RhaiGamesData {
 
     /// Start a new game session for a topic
     pub async fn start_session(&self, topic: &str, script_id: &str) -> Result<()> {
-        // Verify script exists
-        if self.loader.get(script_id).await.is_none() {
-            return Err(RhaiError::ScriptNotFound(script_id.to_string()));
-        }
+        // Verify script exists and get namespace
+        let script = self.loader.get(script_id).await
+            .ok_or_else(|| RhaiError::ScriptNotFound(script_id.to_string()))?;
+
+        let namespace = script.meta.namespace.clone();
 
         let mut sessions = self.sessions.write().await;
-        sessions.insert(topic.to_string(), GameSession::new(script_id.to_string()));
-        info!("Started session for topic '{}' with script '{}'", topic, script_id);
+        sessions.insert(
+            topic.to_string(),
+            GameSession::with_namespace(script_id.to_string(), namespace.clone()),
+        );
+        info!(
+            "Started session for topic '{}' with script '{}' (namespace: {:?})",
+            topic, script_id, namespace
+        );
         Ok(())
     }
 
     /// End a game session
     pub async fn end_session(&self, topic: &str) {
+        // Cancel all timers for this topic
+        self.timers.cancel_all_for_topic(topic).await;
+
         let mut sessions = self.sessions.write().await;
         if sessions.remove(topic).is_some() {
             info!("Ended session for topic '{}'", topic);
@@ -158,13 +288,18 @@ impl RhaiGamesData {
         let script = self.loader.get(script_id).await
             .ok_or_else(|| RhaiError::ScriptNotFound(script_id.to_string()))?;
 
-        // Get or create session
+        // Get or create session with namespace
         let topic = ctx.topic.clone();
         {
             let mut sessions = self.sessions.write().await;
             sessions
                 .entry(topic.clone())
-                .or_insert_with(|| GameSession::new(script_id.to_string()));
+                .or_insert_with(|| {
+                    GameSession::with_namespace(
+                        script_id.to_string(),
+                        script.meta.namespace.clone(),
+                    )
+                });
         }
 
         // Build full context with args
@@ -173,7 +308,19 @@ impl RhaiGamesData {
 
         // Execute command handler
         let fn_name = format!("on_command_{}", command);
-        self.engine.call_script_fn(&script, &self.sessions, &topic, &fn_name, &full_ctx, &self.bridge_tx).await
+        let result = self.engine.call_script_fn(
+            &script,
+            &self.sessions,
+            &topic,
+            &fn_name,
+            &full_ctx,
+            &self.bridge_tx,
+        ).await?;
+
+        // Process scheduled timers from script execution
+        self.process_scheduled_timers(&topic, script_id).await;
+
+        Ok(result)
     }
 
     /// Handle a message for an active session
@@ -203,7 +350,48 @@ impl RhaiGamesData {
         }
 
         // Execute message handler
-        self.engine.call_script_fn(&script, &self.sessions, topic, "on_message", ctx, &self.bridge_tx).await
+        let result = self.engine.call_script_fn(
+            &script,
+            &self.sessions,
+            topic,
+            "on_message",
+            ctx,
+            &self.bridge_tx,
+        ).await?;
+
+        // Process scheduled timers from script execution
+        self.process_scheduled_timers(topic, &script_id).await;
+
+        Ok(result)
+    }
+
+    /// Process timers scheduled during script execution
+    async fn process_scheduled_timers(&self, topic: &str, script_id: &str) {
+        // Get scheduled timers from thread-local
+        let scheduled = RhaiEngine::take_scheduled_timers();
+        let cancelled = RhaiEngine::take_cancelled_timers();
+
+        // Cancel requested timers
+        for timer_id in cancelled {
+            self.timers.cancel(timer_id).await;
+        }
+
+        // Schedule new timers
+        for (_temp_id, delay, context, repeating) in scheduled {
+            let real_id = self.timers.schedule(
+                topic.to_string(),
+                script_id.to_string(),
+                delay,
+                context,
+                repeating,
+            ).await;
+
+            // Track timer in session
+            let mut sessions = self.sessions.write().await;
+            if let Some(session) = sessions.get_mut(topic) {
+                session.add_timer(real_id);
+            }
+        }
     }
 
     /// Reload all scripts

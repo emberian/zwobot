@@ -3,7 +3,8 @@
 //! Provides async-friendly inference using local models via mistral.rs.
 
 use mistralrs::{
-    Constraint, GgufModelBuilder, IsqType, Model, NormalRequest, Request, RequestBuilder,
+    Constraint, DiffusionGenerationParams, DiffusionLoaderType, DiffusionModelBuilder, GgufModelBuilder,
+    ImageGenerationResponseFormat, IsqType, Model, NormalRequest, Request, RequestBuilder,
     RequestMessage, ResponseOk, SamplingParams, TextMessageRole, TextMessages, TextModelBuilder,
 };
 use std::sync::Arc;
@@ -271,6 +272,111 @@ impl LlmEngine {
         format!(
             "Model: {}, Quantization: {}, Max tokens: {}, Temperature: {}",
             self.model_id, self.quantization, self.max_tokens, self.temperature
+        )
+    }
+}
+
+/// Thread-safe wrapper for mistral.rs diffusion model inference
+pub struct ImageEngine {
+    model: Arc<Model>,
+    model_id: String,
+    default_width: usize,
+    default_height: usize,
+}
+
+impl ImageEngine {
+    /// Create a new Image engine with the specified FLUX model.
+    ///
+    /// # Arguments
+    /// * `model_id` - HuggingFace repo (e.g., "black-forest-labs/FLUX.1-schnell")
+    /// * `offloaded` - If true, use offloaded mode for lower memory (~4GB vs ~33GB)
+    /// * `default_width` - Default image width
+    /// * `default_height` - Default image height
+    pub async fn new(
+        model_id: &str,
+        offloaded: bool,
+        default_width: usize,
+        default_height: usize,
+    ) -> Result<Self> {
+        info!("Loading diffusion model: {} (offloaded: {})", model_id, offloaded);
+
+        let loader_type = if offloaded {
+            DiffusionLoaderType::FluxOffloaded
+        } else {
+            DiffusionLoaderType::Flux
+        };
+
+        let model = DiffusionModelBuilder::new(model_id, loader_type)
+            .with_logging()
+            .build()
+            .await
+            .map_err(|e| LlmError::ModelLoad(e.to_string()))?;
+
+        info!("Diffusion model loaded successfully");
+
+        Ok(Self {
+            model: Arc::new(model),
+            model_id: model_id.to_string(),
+            default_width,
+            default_height,
+        })
+    }
+
+    /// Returns the current model ID.
+    pub fn model_id(&self) -> &str {
+        &self.model_id
+    }
+
+    /// Generate an image from a text prompt.
+    ///
+    /// Returns the path to the generated image file.
+    pub async fn generate(&self, prompt: &str) -> Result<String> {
+        self.generate_with_size(prompt, self.default_width, self.default_height)
+            .await
+    }
+
+    /// Generate an image from a text prompt with custom dimensions.
+    ///
+    /// Returns the path to the generated image file.
+    pub async fn generate_with_size(
+        &self,
+        prompt: &str,
+        width: usize,
+        height: usize,
+    ) -> Result<String> {
+        debug!(prompt_len = prompt.len(), width, height, "Starting image generation");
+        trace!(prompt = %prompt, "Full prompt");
+
+        let start = std::time::Instant::now();
+
+        let params = DiffusionGenerationParams { width, height };
+
+        let response = self
+            .model
+            .generate_image(prompt, ImageGenerationResponseFormat::Url, params)
+            .await
+            .map_err(|e| LlmError::Inference(e.to_string()))?;
+
+        let image_path = response
+            .data
+            .first()
+            .and_then(|d| d.url.clone())
+            .ok_or_else(|| LlmError::Inference("No image URL in response".to_string()))?;
+
+        let elapsed = start.elapsed();
+        info!(
+            elapsed_secs = elapsed.as_secs_f32(),
+            "Image generation complete"
+        );
+
+        Ok(image_path)
+    }
+
+    /// Get model info string
+    pub fn model_info(&self) -> String {
+        format!(
+            "Model: {}, Default size: {}x{}",
+            self.model_id, self.default_width, self.default_height
         )
     }
 }

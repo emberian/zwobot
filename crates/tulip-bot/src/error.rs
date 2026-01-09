@@ -23,6 +23,7 @@ pub enum TulipError {
     #[error("Invalid argument '{name}': {reason}")]
     InvalidArgument { name: String, reason: String },
 
+    #[cfg(feature = "runtime")]
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
 

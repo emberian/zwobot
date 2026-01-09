@@ -1,0 +1,14 @@
+{
+  "name": "@tulip/playground",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "cd ../../crates/playground-wasm && wasm-pack build --target web --out-dir ../../packages/playground/pkg",
+    "build": "npm run build:wasm",
+    "dev": "npx serve ."
+  },
+  "devDependencies": {
+    "serve": "^14.2.0"
+  }
+}

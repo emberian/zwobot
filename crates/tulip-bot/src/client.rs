@@ -5,9 +5,11 @@ use crate::error::{Result, TulipError};
 use crate::response::Response;
 use crate::types::{Event, TulipConfig};
 use crate::widget::Widget;
+use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::Path;
 use tracing::{debug, info, trace};
 
 /// Client for interacting with the Tulip (Zulip) API
@@ -54,6 +56,11 @@ pub struct RegisteredCommand {
 #[derive(Debug, Deserialize)]
 struct ListCommandsResponse {
     commands: Vec<RegisteredCommand>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UploadFileResponse {
+    uri: String,
 }
 
 impl TulipClient {
@@ -404,5 +411,69 @@ impl TulipClient {
 
         let data: ListCommandsResponse = response.json().await?;
         Ok(data.commands)
+    }
+
+    /// Upload a file and return the URI that can be used in messages.
+    ///
+    /// The returned URI can be embedded in message content as a markdown image:
+    /// `![alt text](uri)` or linked as `[filename](uri)`
+    pub async fn upload_file(&self, file_path: impl AsRef<Path>) -> Result<String> {
+        let file_path = file_path.as_ref();
+        let url = format!("{}/api/v1/user_uploads", self.config.site);
+
+        // Read file contents
+        let file_bytes = tokio::fs::read(file_path)
+            .await
+            .map_err(|e| TulipError::Api(format!("Failed to read file: {}", e)))?;
+
+        // Get filename
+        let filename = file_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("file")
+            .to_string();
+
+        // Detect mime type from extension
+        let mime_type = match file_path.extension().and_then(|e| e.to_str()) {
+            Some("png") => "image/png",
+            Some("jpg") | Some("jpeg") => "image/jpeg",
+            Some("gif") => "image/gif",
+            Some("webp") => "image/webp",
+            Some("pdf") => "application/pdf",
+            _ => "application/octet-stream",
+        };
+
+        // Build multipart form
+        let part = Part::bytes(file_bytes)
+            .file_name(filename.clone())
+            .mime_str(mime_type)
+            .map_err(|e| TulipError::Api(format!("Invalid mime type: {}", e)))?;
+
+        let form = Form::new().part("file", part);
+
+        debug!("Uploading file: {}", filename);
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .multipart(form)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to upload file ({}): {}",
+                status, text
+            )));
+        }
+
+        let data: UploadFileResponse = response.json().await?;
+        info!("Uploaded file {}, uri: {}", filename, data.uri);
+
+        // Return full URL (uri is relative like /user_uploads/...)
+        Ok(format!("{}{}", self.config.site, data.uri))
     }
 }

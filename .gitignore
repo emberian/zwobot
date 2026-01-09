@@ -3,3 +3,5 @@ target
 zuliprc
 qwobot
 state
+rhai
+node_modules/

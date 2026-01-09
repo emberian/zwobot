@@ -1,42 +1,47 @@
-[package]
-name = "zwobot"
+[workspace]
+resolver = "2"
+members = [
+    "crates/tulip-bot",
+    "crates/llm",
+    "crates/debate",
+    "crates/spweencraft",
+    "crates/rhai-games",
+    "crates/zwobot",
+    "crates/playground-wasm",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
-description = "Zulip bot serving local LLMs via llama.cpp"
 license = "MIT"
 
-[[bin]]
-name = "zwobot"
-path = "src/main.rs"
-
-[[bin]]
-name = "download_model"
-path = "src/bin/download_model.rs"
-
-[dependencies]
-# LLM - llama.cpp bindings (reuse from qwobot)
-llama-cpp-2 = "0.1"
-hf-hub = "0.3"
-
+[workspace.dependencies]
 # Async
 tokio = { version = "1", features = ["full"] }
 
-# HTTP client for Zulip API
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], default-features = false }
 
-# Config
+# Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+ron = "0.8"
 
 # Error handling
 thiserror = "1"
 anyhow = "1"
 
-# Random
-rand = "0.8"
-
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# LLM
+mistralrs = { path = "/Users/ember/src/mistral.rs/mistralrs", features = ["metal"] }
+
+# Internal crates
+tulip-bot = { path = "crates/tulip-bot" }
+llm = { path = "crates/llm" }
+debate = { path = "crates/debate" }
+spweencraft = { path = "crates/spweencraft" }
+rhai-games = { path = "crates/rhai-games" }

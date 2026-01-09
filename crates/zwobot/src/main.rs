@@ -3,7 +3,7 @@
 //! A bot that engages users in structured debates using local LLMs.
 
 use debate::{build_judge_prompt, build_opponent_prompt, DebateManager};
-use llm::LlmEngine;
+use llm::{ImageEngine, LlmEngine};
 use rhai_games::RhaiGamesData;
 use serde::Deserialize;
 use spweencraft::SpweencraftData;
@@ -26,6 +26,7 @@ struct AppConfig {
     channel: String,
     debate_opponent: ModelConfig,
     debate_judge: ModelConfig,
+    image_model: ImageModelConfig,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -46,6 +47,25 @@ fn default_temperature() -> f32 {
     0.7
 }
 
+#[derive(Debug, Deserialize, Clone)]
+struct ImageModelConfig {
+    model_id: String,
+    #[serde(default)]
+    offloaded: bool,
+    #[serde(default = "default_image_width")]
+    default_width: usize,
+    #[serde(default = "default_image_height")]
+    default_height: usize,
+}
+
+fn default_image_width() -> usize {
+    1280
+}
+
+fn default_image_height() -> usize {
+    720
+}
+
 impl AppConfig {
     fn load() -> anyhow::Result<Self> {
         let config_str = std::fs::read_to_string("config/default.toml")?;
@@ -59,8 +79,10 @@ struct BotData {
     debates: Arc<RwLock<DebateManager>>,
     opponent_model: Arc<RwLock<Option<Arc<LlmEngine>>>>,
     judge_model: Arc<RwLock<Option<Arc<LlmEngine>>>>,
+    image_model: Arc<RwLock<Option<Arc<ImageEngine>>>>,
     opponent_config: ModelConfig,
     judge_config: ModelConfig,
+    image_config: ImageModelConfig,
     spweencraft: Arc<SpweencraftData>,
     rhai_games: Arc<RhaiGamesData>,
 }
@@ -442,6 +464,91 @@ impl Command<BotData> for RhaiEndCommand {
     }
 }
 
+/// /imagine command - generate an image from a text prompt
+struct ImagineCommand;
+
+impl Command<BotData> for ImagineCommand {
+    fn definition(&self) -> CommandDef {
+        CommandDef::new("imagine", "Generate an image from a text prompt using FLUX")
+            .option(CommandOption::string("prompt", "Description of the image to generate").required())
+            .option(CommandOption::number("width", "Image width in pixels (default: 1280)"))
+            .option(CommandOption::number("height", "Image height in pixels (default: 720)"))
+    }
+
+    fn execute<'a>(&'a self, ctx: CommandContext<'a, BotData>) -> BoxFuture<'a, tulip_bot::Result<Response>> {
+        Box::pin(async move {
+            let prompt = ctx.args.get::<String>("prompt")?;
+            let width = ctx.args.get::<f64>("width").ok().map(|w| w as usize);
+            let height = ctx.args.get::<f64>("height").ok().map(|h| h as usize);
+
+            // Add working reaction
+            ctx.react("art").await.ok();
+
+            // Ensure image model is loaded
+            let engine = get_or_load_image_model(
+                ctx.data.image_model.clone(),
+                &ctx.data.image_config,
+            )
+            .await
+            .map_err(|e| tulip_bot::TulipError::Command(format!("Image model load failed: {}", e)))?;
+
+            // Generate image with optional custom dimensions
+            let image_path = match (width, height) {
+                (Some(w), Some(h)) => engine.generate_with_size(&prompt, w, h).await,
+                _ => engine.generate(&prompt).await,
+            }
+            .map_err(|e| tulip_bot::TulipError::Command(format!("Image generation failed: {}", e)))?;
+
+            // Upload to Zulip
+            let image_url = ctx
+                .client
+                .upload_file(&image_path)
+                .await
+                .map_err(|e| tulip_bot::TulipError::Command(format!("Failed to upload image: {}", e)))?;
+
+            ctx.unreact("art").await.ok();
+            ctx.react("frame_with_picture").await.ok();
+
+            // Return message with embedded image
+            let content = format!(
+                "**Prompt:** {}\n\n![Generated image]({})",
+                prompt, image_url
+            );
+
+            Ok(Response::message(content))
+        })
+    }
+}
+
+/// /imagine_info command - show info about the image model
+struct ImagineInfoCommand;
+
+impl Command<BotData> for ImagineInfoCommand {
+    fn definition(&self) -> CommandDef {
+        CommandDef::new("imagine_info", "Show information about the image generation model")
+    }
+
+    fn execute<'a>(&'a self, ctx: CommandContext<'a, BotData>) -> BoxFuture<'a, tulip_bot::Result<Response>> {
+        Box::pin(async move {
+            let config = &ctx.data.image_config;
+            let loaded = ctx.data.image_model.read().await.is_some();
+
+            let response = Response::embed(
+                RichEmbed::builder()
+                    .title("Image Model Configuration")
+                    .field("Model ID", &config.model_id, false)
+                    .field("Mode", if config.offloaded { "Offloaded (low VRAM)" } else { "Full (fast)" }, true)
+                    .field("Default Size", &format!("{}x{}", config.default_width, config.default_height), true)
+                    .field("Status", if loaded { "Loaded" } else { "Not loaded (will load on first use)" }, false)
+                    .color(0x3498db)
+                    .build(),
+            );
+
+            Ok(response)
+        })
+    }
+}
+
 /// Combined message handler for Rhai games, debates, and spweens
 async fn handle_combined_message(ctx: MessageContext<'_, BotData>) -> tulip_bot::Result<Option<Response>> {
     let topic = ctx.topic();
@@ -772,6 +879,43 @@ async fn get_or_load_model(
     Ok(engine)
 }
 
+/// Get or load an image model
+async fn get_or_load_image_model(
+    model_slot: Arc<RwLock<Option<Arc<ImageEngine>>>>,
+    config: &ImageModelConfig,
+) -> std::result::Result<Arc<ImageEngine>, llm::LlmError> {
+    // Check if already loaded
+    {
+        let guard = model_slot.read().await;
+        if let Some(ref engine) = *guard {
+            return Ok(engine.clone());
+        }
+    }
+
+    // Load the model
+    info!(
+        "Loading image model {} (offloaded: {})",
+        config.model_id, config.offloaded
+    );
+    let engine = ImageEngine::new(
+        &config.model_id,
+        config.offloaded,
+        config.default_width,
+        config.default_height,
+    )
+    .await?;
+
+    let engine = Arc::new(engine);
+
+    // Store it
+    {
+        let mut guard = model_slot.write().await;
+        *guard = Some(engine.clone());
+    }
+
+    Ok(engine)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize logging
@@ -817,8 +961,10 @@ async fn main() -> anyhow::Result<()> {
         debates: Arc::new(RwLock::new(DebateManager::new())),
         opponent_model: Arc::new(RwLock::new(None)),
         judge_model: Arc::new(RwLock::new(None)),
+        image_model: Arc::new(RwLock::new(None)),
         opponent_config: app_config.debate_opponent,
         judge_config: app_config.debate_judge,
+        image_config: app_config.image_model,
         spweencraft: spween_data,
         rhai_games,
     };
@@ -837,6 +983,8 @@ async fn main() -> anyhow::Result<()> {
         .command(RhaiListCommand)
         .command(RhaiReloadCommand)
         .command(RhaiEndCommand)
+        .command(ImagineCommand)
+        .command(ImagineInfoCommand)
         .on_message(|ctx| Box::pin(handle_combined_message(ctx)))
         .build(tulip_config)
         .await?;

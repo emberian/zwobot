@@ -2,6 +2,40 @@
 
 use serde::Serialize;
 
+/// An external dependency (script or stylesheet) to load
+#[derive(Debug, Clone, Serialize)]
+pub struct Dependency {
+    pub url: String,
+    #[serde(rename = "type")]
+    pub dep_type: DependencyType,
+}
+
+/// Type of external dependency
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DependencyType {
+    Script,
+    Style,
+}
+
+impl Dependency {
+    /// Create a script dependency
+    pub fn script(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            dep_type: DependencyType::Script,
+        }
+    }
+
+    /// Create a stylesheet dependency
+    pub fn style(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            dep_type: DependencyType::Style,
+        }
+    }
+}
+
 /// A freeform widget with custom HTML, CSS, and JavaScript
 ///
 /// **Warning**: Only available to trusted bots. Attempting to send
@@ -14,6 +48,10 @@ pub struct Freeform {
     pub css: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub js: Option<String>,
+    /// External dependencies (scripts/styles) to load before JS executes
+    /// Dependencies are loaded once and shared across all freeform widgets
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependencies: Option<Vec<Dependency>>,
 }
 
 impl Freeform {
@@ -45,6 +83,23 @@ impl Freeform {
     /// And a `container` element for the widget DOM.
     pub fn js(mut self, js: impl Into<String>) -> Self {
         self.js = Some(js.into());
+        self
+    }
+
+    /// Set external dependencies to load
+    ///
+    /// Dependencies are loaded once and shared across all freeform widgets.
+    /// The JS code will not execute until all dependencies are loaded.
+    pub fn dependencies(mut self, deps: Vec<Dependency>) -> Self {
+        self.dependencies = Some(deps);
+        self
+    }
+
+    /// Add a single dependency
+    pub fn dependency(mut self, dep: Dependency) -> Self {
+        self.dependencies
+            .get_or_insert_with(Vec::new)
+            .push(dep);
         self
     }
 }

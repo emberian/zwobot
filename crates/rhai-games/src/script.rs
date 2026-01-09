@@ -29,10 +29,14 @@ pub struct ScriptMeta {
     pub title: String,
     /// Description
     pub description: String,
+    /// Namespace for shared state (scripts in same namespace can share state)
+    pub namespace: Option<String>,
     /// Commands this script registers
     pub commands: Vec<CommandMeta>,
     /// Whether this script handles messages (has `on_message` function)
     pub handles_messages: bool,
+    /// Whether this script handles timers (has `on_timer` function)
+    pub handles_timers: bool,
     /// Default LLM config if script uses LLM
     pub default_llm: Option<LlmConfig>,
 }
@@ -84,6 +88,8 @@ impl GameScript {
                 meta.title = rest.trim().to_string();
             } else if let Some(rest) = content.strip_prefix("@description ") {
                 meta.description = rest.trim().to_string();
+            } else if let Some(rest) = content.strip_prefix("@namespace ") {
+                meta.namespace = Some(rest.trim().to_string());
             } else if let Some(rest) = content.strip_prefix("@command ") {
                 if let Some(cmd) = Self::parse_command_meta(rest) {
                     meta.commands.push(cmd);
@@ -95,6 +101,8 @@ impl GameScript {
 
         // Check if script has on_message function
         meta.handles_messages = source.contains("fn on_message(");
+        // Check if script has on_timer function
+        meta.handles_timers = source.contains("fn on_timer(");
 
         meta
     }

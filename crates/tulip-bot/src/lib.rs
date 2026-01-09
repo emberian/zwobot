@@ -48,17 +48,28 @@
 //! }
 //! ```
 
-pub mod client;
-pub mod command;
-pub mod context;
-pub mod error;
-pub mod framework;
-pub mod interaction;
-pub mod prelude;
-pub mod response;
-pub mod types;
+// Always available - widget types and serialization
 pub mod widget;
+pub mod error;
+pub mod types;
+
+// Runtime-dependent modules
+#[cfg(feature = "runtime")]
+pub mod client;
+#[cfg(feature = "runtime")]
+pub mod command;
+#[cfg(feature = "runtime")]
+pub mod context;
+#[cfg(feature = "runtime")]
+pub mod framework;
+#[cfg(feature = "runtime")]
+pub mod interaction;
+#[cfg(feature = "runtime")]
+pub mod prelude;
+#[cfg(feature = "runtime")]
+pub mod response;
 
 // Re-export key types at crate root
 pub use error::{Result, TulipError};
+#[cfg(feature = "runtime")]
 pub use types::TulipConfig;

@@ -1,0 +1,147 @@
+name: Deploy Game Widgets to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'packages/game-widgets/**'
+      - 'packages/playground/**'
+      - 'crates/playground-wasm/**'
+      - 'crates/tulip-bot/src/widget/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: packages/game-widgets/package-lock.json
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/playground-wasm
+
+      - name: Install game-widgets dependencies
+        working-directory: packages/game-widgets
+        run: npm ci
+
+      - name: Build game-widgets
+        working-directory: packages/game-widgets
+        run: npm run build
+
+      - name: Build playground WASM
+        run: |
+          cd crates/playground-wasm
+          wasm-pack build --target web --out-dir ../../packages/playground/pkg
+
+      - name: Prepare Pages artifact
+        run: |
+          mkdir -p _site/game-widgets
+          mkdir -p _site/playground
+
+          # Copy game-widgets
+          cp packages/game-widgets/dist/tulip-game-widgets.js _site/game-widgets/
+          cp packages/game-widgets/dist/style.css _site/game-widgets/
+
+          # Copy playground
+          cp packages/playground/index.html _site/playground/
+          cp -r packages/playground/pkg _site/playground/
+
+          # Copy game-widgets into playground for local reference
+          mkdir -p _site/playground/game-widgets/dist
+          cp packages/game-widgets/dist/tulip-game-widgets.js _site/playground/game-widgets/dist/
+          cp packages/game-widgets/dist/style.css _site/playground/game-widgets/dist/
+
+          # Create index pages
+          cat > _site/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Tulip Game Widgets</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; }
+              h1 { color: #8b5cf6; }
+              a { color: #8b5cf6; }
+              ul { line-height: 2; }
+            </style>
+          </head>
+          <body>
+            <h1>Tulip Game Widgets</h1>
+            <p>Rich game-oriented UI components for freeform widgets.</p>
+            <ul>
+              <li><a href="playground/">Interactive Playground</a> - Test widgets with live WASM</li>
+              <li><a href="game-widgets/">Runtime Bundle</a> - Production assets</li>
+            </ul>
+          </body>
+          </html>
+          EOF
+
+          cat > _site/game-widgets/index.html << 'EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Tulip Game Widgets - Runtime</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 20px; }
+              h1 { color: #8b5cf6; }
+              a { color: #8b5cf6; }
+              code { background: #f0f0f0; padding: 2px 6px; border-radius: 4px; }
+              pre { background: #f0f0f0; padding: 16px; border-radius: 8px; overflow-x: auto; }
+            </style>
+          </head>
+          <body>
+            <h1>Tulip Game Widgets Runtime</h1>
+            <h2>Files</h2>
+            <ul>
+              <li><a href="tulip-game-widgets.js">tulip-game-widgets.js</a></li>
+              <li><a href="style.css">style.css</a></li>
+            </ul>
+            <h2>Usage</h2>
+            <pre>&lt;link rel="stylesheet" href="style.css"&gt;
+          &lt;script src="tulip-game-widgets.js"&gt;&lt;/script&gt;
+          &lt;script&gt;
+            TulipWidgets.render(container, 'dialogue', props, ctx);
+          &lt;/script&gt;</pre>
+            <p><a href="../playground/">Try the interactive playground →</a></p>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

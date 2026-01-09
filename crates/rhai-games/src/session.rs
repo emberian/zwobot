@@ -8,6 +8,8 @@ use std::time::Instant;
 pub struct GameSession {
     /// Script ID this session is running
     pub script_id: String,
+    /// Namespace for shared state (from script metadata)
+    pub namespace: Option<String>,
     /// Custom state map accessible from scripts
     pub state: Map,
     /// Turn counter
@@ -16,6 +18,8 @@ pub struct GameSession {
     pub players: Vec<Player>,
     /// Session creation time
     pub created_at: Instant,
+    /// Timer IDs owned by this session
+    pub timers: Vec<u64>,
 }
 
 /// A player in a game session
@@ -31,11 +35,36 @@ impl GameSession {
     pub fn new(script_id: String) -> Self {
         Self {
             script_id,
+            namespace: None,
             state: Map::new(),
             turn: 0,
             players: Vec::new(),
             created_at: Instant::now(),
+            timers: Vec::new(),
         }
+    }
+
+    /// Create a new game session with a namespace
+    pub fn with_namespace(script_id: String, namespace: Option<String>) -> Self {
+        Self {
+            script_id,
+            namespace,
+            state: Map::new(),
+            turn: 0,
+            players: Vec::new(),
+            created_at: Instant::now(),
+            timers: Vec::new(),
+        }
+    }
+
+    /// Add a timer ID to this session
+    pub fn add_timer(&mut self, timer_id: u64) {
+        self.timers.push(timer_id);
+    }
+
+    /// Remove a timer ID from this session
+    pub fn remove_timer(&mut self, timer_id: u64) {
+        self.timers.retain(|&id| id != timer_id);
     }
 
     /// Get a state value
