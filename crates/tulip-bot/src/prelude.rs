@@ -13,7 +13,10 @@ pub use crate::interaction::{
     on_interaction, Interaction, InteractionData, InteractionHandler, InteractionType, PrefixHandler,
 };
 pub use crate::response::Response;
-pub use crate::types::{Event, Message, TulipConfig, User};
+pub use crate::types::{
+    CreatePersonaParams, Event, Message, Persona, RealmPersona, TulipConfig, UpdatePersonaParams,
+    User,
+};
 pub use crate::widget::{
     ActionRow, Button, ButtonStyle, Component, Freeform, Interactive, Modal, RichEmbed,
     RichEmbedBuilder, SelectMenu, SelectOption, TextInput, TextInputStyle, Widget,

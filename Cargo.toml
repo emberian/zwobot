@@ -6,6 +6,7 @@ members = [
     "crates/debate",
     "crates/spweencraft",
     "crates/rhai-games",
+    "crates/rpg",
     "crates/zwobot",
     "crates/playground-wasm",
 ]
@@ -45,3 +46,4 @@ llm = { path = "crates/llm" }
 debate = { path = "crates/debate" }
 spweencraft = { path = "crates/spweencraft" }
 rhai-games = { path = "crates/rhai-games" }
+rpg = { path = "crates/rpg" }

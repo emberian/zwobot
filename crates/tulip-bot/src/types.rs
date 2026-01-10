@@ -133,6 +133,117 @@ pub struct SubMessageEvent {
     pub content: serde_json::Value,
 }
 
+/// A user-owned persona (character identity)
+///
+/// Personas are personal and portable - they belong to a user and can be
+/// used in any channel. Unlike bot-controlled puppets, personas represent
+/// the user under a different identity.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Persona {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub bio: Option<String>,
+    #[serde(default)]
+    pub is_active: bool,
+    #[serde(default)]
+    pub date_created: Option<i64>,
+}
+
+/// A realm persona entry (for @-mention typeahead)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RealmPersona {
+    pub id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    pub user_id: i64,
+    pub user_full_name: String,
+}
+
+/// Parameters for creating a new persona
+#[derive(Debug, Clone, Serialize)]
+pub struct CreatePersonaParams {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+}
+
+impl CreatePersonaParams {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            avatar_url: None,
+            color: None,
+            bio: None,
+        }
+    }
+
+    pub fn with_avatar(mut self, url: impl Into<String>) -> Self {
+        self.avatar_url = Some(url.into());
+        self
+    }
+
+    pub fn with_color(mut self, color: impl Into<String>) -> Self {
+        self.color = Some(color.into());
+        self
+    }
+
+    pub fn with_bio(mut self, bio: impl Into<String>) -> Self {
+        self.bio = Some(bio.into());
+        self
+    }
+}
+
+/// Parameters for updating an existing persona
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdatePersonaParams {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+}
+
+impl UpdatePersonaParams {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    pub fn avatar_url(mut self, url: impl Into<String>) -> Self {
+        self.avatar_url = Some(url.into());
+        self
+    }
+
+    pub fn color(mut self, color: impl Into<String>) -> Self {
+        self.color = Some(color.into());
+        self
+    }
+
+    pub fn bio(mut self, bio: impl Into<String>) -> Self {
+        self.bio = Some(bio.into());
+        self
+    }
+}
+
 /// Configuration for connecting to Tulip
 #[derive(Debug, Clone)]
 pub struct TulipConfig {

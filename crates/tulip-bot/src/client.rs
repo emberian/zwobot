@@ -3,7 +3,7 @@
 use crate::command::CommandDef;
 use crate::error::{Result, TulipError};
 use crate::response::Response;
-use crate::types::{Event, TulipConfig};
+use crate::types::{CreatePersonaParams, Event, Persona, RealmPersona, TulipConfig, UpdatePersonaParams};
 use crate::widget::Widget;
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
@@ -62,6 +62,21 @@ struct ListCommandsResponse {
 #[derive(Debug, Deserialize)]
 struct UploadFileResponse {
     uri: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListPersonasResponse {
+    personas: Vec<Persona>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersonaResponse {
+    persona: Persona,
+}
+
+#[derive(Debug, Deserialize)]
+struct RealmPersonasResponse {
+    personas: Vec<RealmPersona>,
 }
 
 impl TulipClient {
@@ -148,7 +163,7 @@ impl TulipClient {
 
     /// Send a message as a puppet (custom persona)
     ///
-    /// Puppets allow bots to send messages with custom names and avatars.
+    /// Puppets allow bots to send messages with custom names, avatars, and colors.
     /// The stream must have puppet mode enabled.
     pub async fn send_message_as_puppet(
         &self,
@@ -157,6 +172,7 @@ impl TulipClient {
         content: &str,
         puppet_name: &str,
         puppet_avatar_url: Option<&str>,
+        puppet_color: Option<&str>,
     ) -> Result<i64> {
         let url = format!("{}/api/v1/messages", self.config.site);
 
@@ -165,9 +181,12 @@ impl TulipClient {
         params.insert("to", channel.to_string());
         params.insert("topic", topic.to_string());
         params.insert("content", content.to_string());
-        params.insert("puppet_name", puppet_name.to_string());
+        params.insert("puppet_display_name", puppet_name.to_string());
         if let Some(avatar) = puppet_avatar_url {
             params.insert("puppet_avatar_url", avatar.to_string());
+        }
+        if let Some(color) = puppet_color {
+            params.insert("puppet_color", color.to_string());
         }
 
         trace!(
@@ -684,5 +703,250 @@ impl TulipClient {
         });
 
         self.add_submessage(message_id, "widget", &content).await
+    }
+
+    // =========================================================================
+    // Persona API
+    // =========================================================================
+
+    /// List all active personas for the current user
+    pub async fn list_personas(&self) -> Result<Vec<Persona>> {
+        let url = format!("{}/json/users/me/personas", self.config.site);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to list personas ({}): {}",
+                status, text
+            )));
+        }
+
+        let data: ListPersonasResponse = response.json().await?;
+        debug!("Listed {} personas", data.personas.len());
+        Ok(data.personas)
+    }
+
+    /// Create a new persona
+    pub async fn create_persona(&self, params: &CreatePersonaParams) -> Result<Persona> {
+        let url = format!("{}/json/users/me/personas", self.config.site);
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .json(params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to create persona ({}): {}",
+                status, text
+            )));
+        }
+
+        let data: PersonaResponse = response.json().await?;
+        info!("Created persona '{}' with id={}", data.persona.name, data.persona.id);
+        Ok(data.persona)
+    }
+
+    /// Update an existing persona
+    pub async fn update_persona(
+        &self,
+        persona_id: i64,
+        params: &UpdatePersonaParams,
+    ) -> Result<Persona> {
+        let url = format!("{}/json/users/me/personas/{}", self.config.site, persona_id);
+
+        let response = self
+            .client
+            .patch(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .json(params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to update persona ({}): {}",
+                status, text
+            )));
+        }
+
+        let data: PersonaResponse = response.json().await?;
+        debug!("Updated persona id={}", persona_id);
+        Ok(data.persona)
+    }
+
+    /// Delete a persona (soft-delete, marks as inactive)
+    pub async fn delete_persona(&self, persona_id: i64) -> Result<()> {
+        let url = format!("{}/json/users/me/personas/{}", self.config.site, persona_id);
+
+        let response = self
+            .client
+            .delete(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to delete persona ({}): {}",
+                status, text
+            )));
+        }
+
+        info!("Deleted persona id={}", persona_id);
+        Ok(())
+    }
+
+    /// Get all active personas in the realm (for @-mention typeahead)
+    pub async fn get_realm_personas(&self) -> Result<Vec<RealmPersona>> {
+        let url = format!("{}/json/realm/personas", self.config.site);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to get realm personas ({}): {}",
+                status, text
+            )));
+        }
+
+        let data: RealmPersonasResponse = response.json().await?;
+        debug!("Got {} realm personas", data.personas.len());
+        Ok(data.personas)
+    }
+
+    /// Send a message as a persona
+    ///
+    /// Personas are user-owned character identities that can be used anywhere.
+    pub async fn send_message_as_persona(
+        &self,
+        channel: &str,
+        topic: &str,
+        content: &str,
+        persona_id: i64,
+    ) -> Result<i64> {
+        let url = format!("{}/api/v1/messages", self.config.site);
+
+        let mut params = HashMap::new();
+        params.insert("type", "stream".to_string());
+        params.insert("to", channel.to_string());
+        params.insert("topic", topic.to_string());
+        params.insert("content", content.to_string());
+        params.insert("persona_id", persona_id.to_string());
+
+        trace!(
+            "Sending message as persona {} to {}/{}: {}",
+            persona_id,
+            channel,
+            topic,
+            content
+        );
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to send persona message ({}): {}",
+                status, text
+            )));
+        }
+
+        let resp: SendMessageResponse = response.json().await?;
+        debug!(
+            "Persona message sent to {}/{} as persona {}, id={}",
+            channel, topic, persona_id, resp.id
+        );
+        Ok(resp.id)
+    }
+
+    // =========================================================================
+    // Whisper API
+    // =========================================================================
+
+    /// Send a whisper message (visible only to specified recipients)
+    ///
+    /// Whispers are channel messages that are only visible to specific users
+    /// or groups. The sender always has access to their own whispers.
+    pub async fn send_whisper(
+        &self,
+        channel: &str,
+        topic: &str,
+        content: &str,
+        user_ids: Option<&[i64]>,
+        group_ids: Option<&[i64]>,
+        puppet_ids: Option<&[i64]>,
+    ) -> Result<i64> {
+        let url = format!("{}/api/v1/messages", self.config.site);
+
+        let mut params = HashMap::new();
+        params.insert("type", "stream".to_string());
+        params.insert("to", channel.to_string());
+        params.insert("topic", topic.to_string());
+        params.insert("content", content.to_string());
+
+        if let Some(ids) = user_ids {
+            params.insert("whisper_to_user_ids", serde_json::to_string(ids)?);
+        }
+        if let Some(ids) = group_ids {
+            params.insert("whisper_to_group_ids", serde_json::to_string(ids)?);
+        }
+        if let Some(ids) = puppet_ids {
+            params.insert("whisper_to_puppet_ids", serde_json::to_string(ids)?);
+        }
+
+        trace!("Sending whisper to {}/{}", channel, topic);
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to send whisper ({}): {}",
+                status, text
+            )));
+        }
+
+        let resp: SendMessageResponse = response.json().await?;
+        debug!("Whisper sent to {}/{}, id={}", channel, topic, resp.id);
+        Ok(resp.id)
     }
 }

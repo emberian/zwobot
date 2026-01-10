@@ -1,0 +1,17 @@
+[package]
+name = "rpg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "RPG library for zwobot - dice, stats, turns, loot"
+
+[dependencies]
+# From workspace
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# Dice and randomness
+rand = "0.8"

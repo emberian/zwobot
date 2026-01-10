@@ -2856,6 +2856,7 @@ dependencies = [
 [[package]]
 name = "mistralrs"
 version = "0.7.0"
+source = "git+https://github.com/ericlbuehler/mistral.rs#5067d4f31be010a171f1c9fdf1106aaf456b1450"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -2879,6 +2880,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-audio"
 version = "0.7.0"
+source = "git+https://github.com/ericlbuehler/mistral.rs#5067d4f31be010a171f1c9fdf1106aaf456b1450"
 dependencies = [
  "anyhow",
  "apodize",
@@ -2889,6 +2891,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-core"
 version = "0.7.0"
+source = "git+https://github.com/ericlbuehler/mistral.rs#5067d4f31be010a171f1c9fdf1106aaf456b1450"
 dependencies = [
  "ahash",
  "akin",
@@ -2984,6 +2987,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-mcp"
 version = "0.7.0"
+source = "git+https://github.com/ericlbuehler/mistral.rs#5067d4f31be010a171f1c9fdf1106aaf456b1450"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3003,6 +3007,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-paged-attn"
 version = "0.7.0"
+source = "git+https://github.com/ericlbuehler/mistral.rs#5067d4f31be010a171f1c9fdf1106aaf456b1450"
 dependencies = [
  "anyhow",
  "candle-core",
@@ -3017,6 +3022,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-quant"
 version = "0.7.0"
+source = "git+https://github.com/ericlbuehler/mistral.rs#5067d4f31be010a171f1c9fdf1106aaf456b1450"
 dependencies = [
  "byteorder",
  "candle-core",
@@ -3044,6 +3050,7 @@ dependencies = [
 [[package]]
 name = "mistralrs-vision"
 version = "0.7.0"
+source = "git+https://github.com/ericlbuehler/mistral.rs#5067d4f31be010a171f1c9fdf1106aaf456b1450"
 dependencies = [
  "candle-core",
  "image",
@@ -4238,6 +4245,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpg"
+version = "0.1.0"
+dependencies = [
+ "rand 0.8.5",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "rubato"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4927,6 +4946,7 @@ dependencies = [
 [[package]]
 name = "spween"
 version = "0.1.0"
+source = "git+https://github.com/spwplace/spween#afb5b1fce8c9dd3b787e197bddf105adca20e08a"
 dependencies = [
  "logos",
  "serde",
@@ -6907,6 +6927,7 @@ dependencies = [
  "debate",
  "llm",
  "rhai-games",
+ "rpg",
  "serde",
  "spweencraft",
  "tokio",

@@ -5,6 +5,7 @@
 use debate::{build_judge_prompt, build_opponent_prompt, DebateManager};
 use llm::{ImageEngine, LlmEngine};
 use rhai_games::RhaiGamesData;
+use rpg::{combat_key, CharacterSheet, DiceRoll, RpgData};
 use serde::Deserialize;
 use spweencraft::SpweencraftData;
 use std::collections::HashMap;
@@ -43,6 +44,9 @@ struct CtcDetectorConfig {
     /// Optional puppet avatar URL
     #[serde(default)]
     puppet_avatar_url: Option<String>,
+    /// Optional puppet color (hex format: #RGB or #RRGGBB)
+    #[serde(default)]
+    puppet_color: Option<String>,
     /// Optional channel to restrict detection to (if not set, runs on all channels)
     #[serde(default)]
     channel: Option<String>,
@@ -104,6 +108,7 @@ struct BotData {
     image_config: ImageModelConfig,
     spweencraft: Arc<SpweencraftData>,
     rhai_games: Arc<RhaiGamesData>,
+    rpg: Arc<RpgData>,
     // Cinnamon Toast Crunch detector
     ctc_detector: Option<CtcDetectorData>,
 }
@@ -117,6 +122,7 @@ struct CtcDetectorData {
     evaluator_config: ModelConfig,
     puppet_name: String,
     puppet_avatar_url: Option<String>,
+    puppet_color: Option<String>,
     channel: Option<String>,
 }
 
@@ -581,6 +587,471 @@ impl Command<BotData> for ImagineInfoCommand {
     }
 }
 
+// =============================================================================
+// RPG Commands
+// =============================================================================
+
+/// Colors for roll embeds
+const COLOR_CRIT: u32 = 0x2ecc71;     // Green for nat 20
+const COLOR_FAIL: u32 = 0xe74c3c;     // Red for nat 1
+const COLOR_NORMAL: u32 = 0x3498db;   // Blue for normal
+const COLOR_STATS: u32 = 0x9b59b6;    // Purple for character stats
+const COLOR_COMBAT: u32 = 0xe67e22;   // Orange for combat
+
+/// /roll command - roll dice
+struct RollCommand;
+
+impl Command<BotData> for RollCommand {
+    fn definition(&self) -> CommandDef {
+        CommandDef::new("roll", "Roll dice (e.g., 2d6+3, 4d6kh3, adv)")
+            .option(CommandOption::string("dice", "Dice notation").required())
+            .option(CommandOption::string("label", "What you're rolling for"))
+    }
+
+    fn execute<'a>(&'a self, ctx: CommandContext<'a, BotData>) -> BoxFuture<'a, tulip_bot::Result<Response>> {
+        Box::pin(async move {
+            let dice_str: String = ctx.args.get("dice")?;
+            let label: Option<String> = ctx.args.get_optional("label")?;
+
+            match DiceRoll::parse(&dice_str) {
+                Ok(dice) => {
+                    let result = dice.roll();
+                    let embed = build_roll_embed(&result, label.as_deref(), ctx.sender_name(), false);
+                    Ok(Response::embed(embed))
+                }
+                Err(e) => Ok(Response::message(format!("Invalid dice notation: {}", e))),
+            }
+        })
+    }
+}
+
+/// /gmroll command - secret roll (whispered)
+struct GmRollCommand;
+
+impl Command<BotData> for GmRollCommand {
+    fn definition(&self) -> CommandDef {
+        CommandDef::new("gmroll", "Roll dice secretly (only you see the result)")
+            .option(CommandOption::string("dice", "Dice notation").required())
+            .option(CommandOption::string("label", "What you're rolling for"))
+    }
+
+    fn execute<'a>(&'a self, ctx: CommandContext<'a, BotData>) -> BoxFuture<'a, tulip_bot::Result<Response>> {
+        Box::pin(async move {
+            let dice_str: String = ctx.args.get("dice")?;
+            let label: Option<String> = ctx.args.get_optional("label")?;
+
+            match DiceRoll::parse(&dice_str) {
+                Ok(dice) => {
+                    let result = dice.roll();
+                    let embed = build_roll_embed(&result, label.as_deref(), ctx.sender_name(), true);
+                    Ok(Response::embed(embed).make_private(&[ctx.sender_id()]))
+                }
+                Err(e) => Ok(Response::ephemeral(format!("Invalid dice notation: {}", e))),
+            }
+        })
+    }
+}
+
+/// Build a rich embed for dice roll results
+fn build_roll_embed(result: &rpg::RollResult, label: Option<&str>, roller: &str, secret: bool) -> RichEmbed {
+    let mut builder = RichEmbed::builder();
+
+    // Title with optional label
+    let title = if let Some(label) = label {
+        format!("{}Roll: {} ({})", if secret { "Secret " } else { "" }, result.notation, label)
+    } else {
+        format!("{}Roll: {}", if secret { "Secret " } else { "" }, result.notation)
+    };
+    builder = builder.title(title);
+
+    // Check for crits on d20
+    let is_d20 = result.dice.len() == 1 && result.notation.contains("d20");
+    let first_die = result.dice.first().map(|d| d.value);
+
+    let color = if is_d20 {
+        match first_die {
+            Some(20) => COLOR_CRIT,
+            Some(1) => COLOR_FAIL,
+            _ => COLOR_NORMAL,
+        }
+    } else {
+        COLOR_NORMAL
+    };
+    builder = builder.color(color);
+
+    // Dice results
+    builder = builder.field("Dice", result.format_dice(), false);
+
+    // Modifier if any
+    if result.modifier != 0 {
+        let mod_str = if result.modifier > 0 {
+            format!("+{}", result.modifier)
+        } else {
+            format!("{}", result.modifier)
+        };
+        builder = builder.field("Modifier", mod_str, true);
+    }
+
+    // Total
+    let total_str = if is_d20 && first_die == Some(20) {
+        format!("**{}** (Critical!)", result.total)
+    } else if is_d20 && first_die == Some(1) {
+        format!("**{}** (Critical Fail!)", result.total)
+    } else {
+        format!("**{}**", result.total)
+    };
+    builder = builder.field("Total", total_str, true);
+
+    builder = builder.footer(format!("Rolled by {}", roller));
+    builder.build()
+}
+
+/// /stats command - character sheet management
+struct StatsCommand;
+
+impl Command<BotData> for StatsCommand {
+    fn definition(&self) -> CommandDef {
+        CommandDef::new("stats", "View or modify your character stats")
+            .option(
+                CommandOption::string("action", "Action to take")
+                    .choice("view", "view")
+                    .choice("set", "set")
+                    .choice("hurt", "hurt")
+                    .choice("heal", "heal"),
+            )
+            .option(CommandOption::string("stat", "Stat name (hp, str, dex, con, int, wis, cha)"))
+            .option(CommandOption::number("value", "Value to set or amount to change"))
+    }
+
+    fn execute<'a>(&'a self, ctx: CommandContext<'a, BotData>) -> BoxFuture<'a, tulip_bot::Result<Response>> {
+        Box::pin(async move {
+            let action: String = ctx.args.get_optional("action")?.unwrap_or_else(|| "view".to_string());
+            let stat: Option<String> = ctx.args.get_optional("stat")?;
+            let value: Option<i32> = ctx.args.get_optional("value")?;
+
+            let user_id = ctx.sender_id();
+            let user_name = ctx.sender_name().to_string();
+            let rpg = &ctx.data.rpg;
+
+            match action.as_str() {
+                "view" => {
+                    if let Some(sheet) = rpg.get_character(user_id).await {
+                        Ok(Response::embed(build_stats_embed(&sheet)))
+                    } else {
+                        Ok(Response::message("No character sheet found. Use `/stats set hp 20` to start."))
+                    }
+                }
+                "set" => {
+                    let stat = stat.ok_or_else(|| tulip_bot::TulipError::MissingArgument("stat".to_string()))?;
+                    let value = value.ok_or_else(|| tulip_bot::TulipError::MissingArgument("value".to_string()))?;
+
+                    let mut sheet = rpg.get_or_create_character(user_id, user_name).await;
+                    sheet.set_stat(&stat, value);
+                    rpg.update_character(sheet.clone()).await;
+
+                    if let Err(e) = rpg.save().await {
+                        tracing::error!("Failed to save RPG data: {}", e);
+                    }
+
+                    Ok(Response::embed(
+                        RichEmbed::builder()
+                            .title(format!("Set {} = {}", stat.to_uppercase(), value))
+                            .description(sheet.hp_bar())
+                            .color(COLOR_STATS)
+                            .build()
+                    ))
+                }
+                "hurt" => {
+                    let amount = value.ok_or_else(|| tulip_bot::TulipError::MissingArgument("value".to_string()))?;
+
+                    if let Some(mut sheet) = rpg.get_character(user_id).await {
+                        let new_hp = sheet.hurt(amount);
+                        let hp_bar = sheet.hp_bar();
+                        rpg.update_character(sheet).await;
+
+                        if let Err(e) = rpg.save().await {
+                            tracing::error!("Failed to save RPG data: {}", e);
+                        }
+
+                        let msg = if new_hp <= 0 {
+                            format!("{} takes {} damage and falls unconscious!", user_name, amount)
+                        } else {
+                            format!("{} takes {} damage!", user_name, amount)
+                        };
+
+                        Ok(Response::embed(
+                            RichEmbed::builder()
+                                .title(msg)
+                                .description(hp_bar)
+                                .color(COLOR_FAIL)
+                                .build()
+                        ))
+                    } else {
+                        Ok(Response::message("No character sheet. Use `/stats set hp 20` first."))
+                    }
+                }
+                "heal" => {
+                    let amount = value.ok_or_else(|| tulip_bot::TulipError::MissingArgument("value".to_string()))?;
+
+                    if let Some(mut sheet) = rpg.get_character(user_id).await {
+                        sheet.heal(amount);
+                        let hp_bar = sheet.hp_bar();
+                        rpg.update_character(sheet).await;
+
+                        if let Err(e) = rpg.save().await {
+                            tracing::error!("Failed to save RPG data: {}", e);
+                        }
+
+                        Ok(Response::embed(
+                            RichEmbed::builder()
+                                .title(format!("{} heals {} HP!", user_name, amount))
+                                .description(hp_bar)
+                                .color(COLOR_CRIT)
+                                .build()
+                        ))
+                    } else {
+                        Ok(Response::message("No character sheet. Use `/stats set hp 20` first."))
+                    }
+                }
+                _ => Ok(Response::message(format!("Unknown action: {}", action))),
+            }
+        })
+    }
+}
+
+/// Build a character sheet embed
+fn build_stats_embed(sheet: &CharacterSheet) -> RichEmbed {
+    let mut builder = RichEmbed::builder()
+        .title(format!("Character: {}", sheet.name))
+        .color(COLOR_STATS)
+        .description(sheet.hp_bar());
+
+    // Add core stats if they exist
+    for stat in ["str", "dex", "con", "int", "wis", "cha"] {
+        if let Some(formatted) = sheet.format_stat(stat) {
+            if let Some(value) = formatted.split(": ").nth(1) {
+                builder = builder.field(stat.to_uppercase(), value, true);
+            }
+        }
+    }
+
+    builder.build()
+}
+
+/// /initiative command - roll initiative
+struct InitiativeCommand;
+
+impl Command<BotData> for InitiativeCommand {
+    fn definition(&self) -> CommandDef {
+        CommandDef::new("initiative", "Roll initiative to join combat")
+            .option(CommandOption::number("bonus", "Initiative modifier (default 0)"))
+    }
+
+    fn execute<'a>(&'a self, ctx: CommandContext<'a, BotData>) -> BoxFuture<'a, tulip_bot::Result<Response>> {
+        Box::pin(async move {
+            let bonus: i32 = ctx.args.get_optional("bonus")?.unwrap_or(0);
+            let user_id = ctx.sender_id();
+            let user_name = ctx.sender_name().to_string();
+            let key = combat_key(ctx.channel(), ctx.topic());
+            let rpg = &ctx.data.rpg;
+
+            // Roll 1d20 + bonus
+            let dice = DiceRoll::parse(&format!("1d20{:+}", bonus)).unwrap();
+            let result = dice.roll();
+            let initiative = result.total;
+
+            // Add to combat state
+            let mut state = rpg.get_or_create_combat(&key).await;
+            state.add_combatant(user_id, user_name.clone(), initiative, false);
+            let turn_order = state.format_turn_order();
+            let combatant_count = state.combatants.len();
+            rpg.update_combat(&key, state).await;
+
+            if let Err(e) = rpg.save().await {
+                tracing::error!("Failed to save RPG data: {}", e);
+            }
+
+            Ok(Response::embed(
+                RichEmbed::builder()
+                    .title(format!("{} rolls initiative!", user_name))
+                    .color(COLOR_COMBAT)
+                    .field("Roll", format!("1d20{:+} = **{}**", bonus, initiative), false)
+                    .field(format!("Turn Order ({} combatants)", combatant_count), turn_order, false)
+                    .build()
+            ))
+        })
+    }
+}
+
+/// /turn command - turn management
+struct TurnCommand;
+
+impl Command<BotData> for TurnCommand {
+    fn definition(&self) -> CommandDef {
+        CommandDef::new("turn", "Manage combat turns")
+            .option(
+                CommandOption::string("action", "Action to take")
+                    .choice("start", "start")
+                    .choice("next", "next")
+                    .choice("list", "list")
+                    .choice("end", "end")
+                    .required(),
+            )
+    }
+
+    fn execute<'a>(&'a self, ctx: CommandContext<'a, BotData>) -> BoxFuture<'a, tulip_bot::Result<Response>> {
+        Box::pin(async move {
+            let action: String = ctx.args.get("action")?;
+            let key = combat_key(ctx.channel(), ctx.topic());
+            let rpg = &ctx.data.rpg;
+
+            match action.as_str() {
+                "start" => {
+                    if let Some(mut state) = rpg.get_combat(&key).await {
+                        if state.combatants.is_empty() {
+                            return Ok(Response::message("No combatants! Use `/initiative` to join first."));
+                        }
+                        state.start();
+                        let current = state.current().map(|c| c.name.clone()).unwrap_or_default();
+                        let turn_order = state.format_turn_order();
+                        let round = state.round;
+                        rpg.update_combat(&key, state).await;
+
+                        if let Err(e) = rpg.save().await {
+                            tracing::error!("Failed to save RPG data: {}", e);
+                        }
+
+                        Ok(Response::embed(
+                            RichEmbed::builder()
+                                .title("Combat Begins!")
+                                .color(COLOR_COMBAT)
+                                .field(format!("Round {}", round), turn_order, false)
+                                .footer(format!("{}'s turn", current))
+                                .build()
+                        ))
+                    } else {
+                        Ok(Response::message("No combatants! Use `/initiative` to join first."))
+                    }
+                }
+                "next" => {
+                    if let Some(mut state) = rpg.get_combat(&key).await {
+                        if !state.active {
+                            return Ok(Response::message("Combat hasn't started. Use `/turn start`."));
+                        }
+                        let prev = state.current().map(|c| c.name.clone()).unwrap_or_default();
+                        state.next_turn();
+                        let next = state.current().map(|c| c.name.clone()).unwrap_or_default();
+                        let turn_order = state.format_turn_order();
+                        let round = state.round;
+                        rpg.update_combat(&key, state).await;
+
+                        if let Err(e) = rpg.save().await {
+                            tracing::error!("Failed to save RPG data: {}", e);
+                        }
+
+                        Ok(Response::embed(
+                            RichEmbed::builder()
+                                .title(format!("{} ends their turn", prev))
+                                .color(COLOR_COMBAT)
+                                .field(format!("Round {}", round), turn_order, false)
+                                .footer(format!("{}'s turn", next))
+                                .build()
+                        ))
+                    } else {
+                        Ok(Response::message("No combat in this topic. Use `/initiative` first."))
+                    }
+                }
+                "list" => {
+                    if let Some(state) = rpg.get_combat(&key).await {
+                        let status = if state.active {
+                            format!("Round {}", state.round)
+                        } else {
+                            "Not started".to_string()
+                        };
+                        let turn_order = state.format_turn_order();
+                        let current = state.current().map(|c| format!("{}'s turn", c.name));
+
+                        let mut builder = RichEmbed::builder()
+                            .title("Turn Order")
+                            .color(COLOR_COMBAT)
+                            .field("Status", status, true)
+                            .field("Combatants", turn_order, false);
+
+                        if let Some(current) = current {
+                            builder = builder.footer(current);
+                        }
+
+                        Ok(Response::embed(builder.build()))
+                    } else {
+                        Ok(Response::message("No combat in this topic. Use `/initiative` to start."))
+                    }
+                }
+                "end" => {
+                    rpg.remove_combat(&key).await;
+
+                    if let Err(e) = rpg.save().await {
+                        tracing::error!("Failed to save RPG data: {}", e);
+                    }
+
+                    Ok(Response::embed(
+                        RichEmbed::builder()
+                            .title("Combat Ended")
+                            .color(COLOR_COMBAT)
+                            .description("Turn order cleared.")
+                            .build()
+                    ))
+                }
+                _ => Ok(Response::message(format!("Unknown action: {}", action))),
+            }
+        })
+    }
+}
+
+/// /loot command - random tables
+struct LootCommand;
+
+impl Command<BotData> for LootCommand {
+    fn definition(&self) -> CommandDef {
+        CommandDef::new("loot", "Roll on a random table")
+            .option(
+                CommandOption::string("table", "Which table to roll on")
+                    .choice("treasure", "treasure")
+                    .choice("encounter", "encounter")
+                    .choice("trinket", "trinket")
+                    .choice("npc", "npc")
+                    .required(),
+            )
+    }
+
+    fn execute<'a>(&'a self, ctx: CommandContext<'a, BotData>) -> BoxFuture<'a, tulip_bot::Result<Response>> {
+        Box::pin(async move {
+            let table: String = ctx.args.get("table")?;
+            let result = rpg::roll_by_name(&table);
+
+            let (title, color, emoji) = match table.as_str() {
+                "treasure" => ("Treasure Found!", 0xf1c40f, "💰"),
+                "encounter" => ("Encounter!", 0xe74c3c, "⚔️"),
+                "trinket" => ("Strange Trinket", 0x9b59b6, "🔮"),
+                "npc" => ("You Meet...", 0x3498db, "👤"),
+                _ => ("Result", 0x95a5a6, "🎲"),
+            };
+
+            Ok(Response::embed(
+                RichEmbed::builder()
+                    .title(format!("{} {}", emoji, title))
+                    .color(color)
+                    .description(result)
+                    .footer(format!("Rolled by {} on {} table", ctx.sender_name(), table))
+                    .build()
+            ))
+        })
+    }
+}
+
+// =============================================================================
+// Message Handlers
+// =============================================================================
+
 /// Combined message handler for Rhai games, debates, spweens, and CTC detector
 async fn handle_combined_message(ctx: MessageContext<'_, BotData>) -> tulip_bot::Result<Option<Response>> {
     let topic = ctx.topic();
@@ -1014,6 +1485,7 @@ Reply with ONLY "YES" if the response is affirmative/positive, or "NO" if it is 
                 &puppet_message,
                 &ctc_data.puppet_name,
                 ctc_data.puppet_avatar_url.as_deref(),
+                ctc_data.puppet_color.as_deref(),
             )
             .await?;
     }
@@ -1150,9 +1622,18 @@ async fn main() -> anyhow::Result<()> {
             evaluator_config: config.evaluator_model,
             puppet_name: config.puppet_name,
             puppet_avatar_url: config.puppet_avatar_url,
+            puppet_color: config.puppet_color,
             channel: config.channel,
         }
     });
+
+    // Initialize RPG data
+    let rpg_data = RpgData::new("data/rpg");
+    if let Err(e) = rpg_data.load().await {
+        tracing::warn!("Failed to load RPG data (may not exist yet): {}", e);
+    } else {
+        info!("Loaded RPG data from data/rpg");
+    }
 
     // Create shared data
     let data = BotData {
@@ -1165,6 +1646,7 @@ async fn main() -> anyhow::Result<()> {
         image_config: app_config.image_model,
         spweencraft: spween_data,
         rhai_games,
+        rpg: Arc::new(rpg_data),
         ctc_detector,
     };
 
@@ -1172,18 +1654,29 @@ async fn main() -> anyhow::Result<()> {
     let framework = Framework::builder()
         .data(data)
         .channel(&app_config.channel)
+        // Debate commands
         .command(DebateCommand)
         .command(JudgeCommand)
         .command(ClearCommand)
+        // Spweencraft commands
         .command(SpweenCommandWrapper)
         .command(SpweenEndCommandWrapper)
         .command(SpweenListCommandWrapper)
         .command(SpweenReloadCommandWrapper)
+        // Rhai games commands
         .command(RhaiListCommand)
         .command(RhaiReloadCommand)
         .command(RhaiEndCommand)
+        // Image generation
         .command(ImagineCommand)
         .command(ImagineInfoCommand)
+        // RPG commands
+        .command(RollCommand)
+        .command(GmRollCommand)
+        .command(StatsCommand)
+        .command(InitiativeCommand)
+        .command(TurnCommand)
+        .command(LootCommand)
         .on_message(|ctx| Box::pin(handle_combined_message(ctx)))
         .build(tulip_config)
         .await?;

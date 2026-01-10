@@ -15,6 +15,7 @@ llm.workspace = true
 debate.workspace = true
 spweencraft = { path = "../spweencraft" }
 rhai-games = { path = "../rhai-games" }
+rpg.workspace = true
 
 tokio.workspace = true
 tracing.workspace = true
