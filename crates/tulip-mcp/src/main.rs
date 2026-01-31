@@ -120,6 +120,34 @@ struct SubscribeRequest {
     channel: String,
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct EditMessageRequest {
+    #[schemars(description = "The message ID to edit")]
+    message_id: i64,
+    #[schemars(description = "The new content for the message")]
+    content: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct MessageIdRequest {
+    #[schemars(description = "The message ID")]
+    message_id: i64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct UserIdRequest {
+    #[schemars(description = "The user ID to look up")]
+    user_id: i64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+struct TypingRequest {
+    #[schemars(description = "The channel name")]
+    channel: String,
+    #[schemars(description = "The topic name")]
+    topic: String,
+}
+
 /// The MCP handler that provides Tulip tools
 #[derive(Clone)]
 struct TulipMcpHandler {
@@ -432,6 +460,153 @@ impl TulipMcpHandler {
             ))])),
             Err(e) => Err(McpError::internal_error(
                 format!("Failed to unsubscribe: {}", e),
+                None,
+            )),
+        }
+    }
+
+    /// Edit a message
+    #[tool(description = "Edit the content of a message you previously sent.")]
+    async fn edit_message(
+        &self,
+        Parameters(EditMessageRequest { message_id, content }): Parameters<EditMessageRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.lock().await;
+        match client.edit_message(message_id, &content).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Message {} edited successfully",
+                message_id
+            ))])),
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to edit message: {}", e),
+                None,
+            )),
+        }
+    }
+
+    /// Delete a message
+    #[tool(description = "Delete a message you previously sent.")]
+    async fn delete_message(
+        &self,
+        Parameters(MessageIdRequest { message_id }): Parameters<MessageIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.lock().await;
+        match client.delete_message(message_id).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Message {} deleted",
+                message_id
+            ))])),
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to delete message: {}", e),
+                None,
+            )),
+        }
+    }
+
+    /// Get user information
+    #[tool(description = "Get information about a user by their ID.")]
+    async fn get_user(
+        &self,
+        Parameters(UserIdRequest { user_id }): Parameters<UserIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.lock().await;
+        match client.get_user(user_id).await {
+            Ok(user) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "User: {} ({})\nEmail: {}\nBot: {}\nActive: {}",
+                user.full_name,
+                user.get_id(),
+                user.email,
+                user.is_bot,
+                user.is_active
+            ))])),
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to get user: {}", e),
+                None,
+            )),
+        }
+    }
+
+    /// List all users
+    #[tool(description = "List all users in the realm.")]
+    async fn list_users(&self) -> Result<CallToolResult, McpError> {
+        let client = self.client.lock().await;
+        match client.get_users().await {
+            Ok(users) => {
+                let list: Vec<String> = users
+                    .iter()
+                    .filter(|u| u.is_active)
+                    .map(|u| {
+                        let bot_marker = if u.is_bot { " [bot]" } else { "" };
+                        format!("- {} (ID: {}){}", u.full_name, u.get_id(), bot_marker)
+                    })
+                    .collect();
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Users ({} active):\n{}",
+                    list.len(),
+                    list.join("\n")
+                ))]))
+            }
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to list users: {}", e),
+                None,
+            )),
+        }
+    }
+
+    /// Set typing indicator
+    #[tool(description = "Show that you are typing in a channel/topic. Call with the channel and topic you're typing in.")]
+    async fn set_typing(
+        &self,
+        Parameters(TypingRequest { channel, topic }): Parameters<TypingRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.lock().await;
+        match client.set_typing(&channel, &topic, true).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(
+                "Typing indicator shown",
+            )])),
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to set typing: {}", e),
+                None,
+            )),
+        }
+    }
+
+    /// Get a single message
+    #[tool(description = "Get a specific message by its ID.")]
+    async fn get_message(
+        &self,
+        Parameters(MessageIdRequest { message_id }): Parameters<MessageIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.lock().await;
+        match client.get_message(message_id).await {
+            Ok(msg) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Message {} from {} in [{}]:\n{}",
+                msg.id,
+                msg.sender_full_name,
+                msg.topic(),
+                msg.content
+            ))])),
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to get message: {}", e),
+                None,
+            )),
+        }
+    }
+
+    /// Mark messages as read
+    #[tool(description = "Mark a message as read.")]
+    async fn mark_as_read(
+        &self,
+        Parameters(MessageIdRequest { message_id }): Parameters<MessageIdRequest>,
+    ) -> Result<CallToolResult, McpError> {
+        let client = self.client.lock().await;
+        match client.mark_as_read(&[message_id]).await {
+            Ok(()) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "Message {} marked as read",
+                message_id
+            ))])),
+            Err(e) => Err(McpError::internal_error(
+                format!("Failed to mark as read: {}", e),
                 None,
             )),
         }

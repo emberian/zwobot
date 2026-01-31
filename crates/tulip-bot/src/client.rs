@@ -698,6 +698,243 @@ impl TulipClient {
         Ok(())
     }
 
+    /// Edit a message's content
+    pub async fn edit_message(&self, message_id: i64, content: &str) -> Result<()> {
+        let url = format!("{}/api/v1/messages/{}", self.config.site, message_id);
+
+        let response = self
+            .client
+            .patch(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&[("content", content)])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to edit message ({}): {}",
+                status, text
+            )));
+        }
+
+        debug!("Edited message {}", message_id);
+        Ok(())
+    }
+
+    /// Delete a message
+    pub async fn delete_message(&self, message_id: i64) -> Result<()> {
+        let url = format!("{}/api/v1/messages/{}", self.config.site, message_id);
+
+        let response = self
+            .client
+            .delete(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to delete message ({}): {}",
+                status, text
+            )));
+        }
+
+        debug!("Deleted message {}", message_id);
+        Ok(())
+    }
+
+    /// Get information about a specific user
+    pub async fn get_user(&self, user_id: i64) -> Result<crate::types::UserInfo> {
+        let url = format!("{}/api/v1/users/{}", self.config.site, user_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to get user ({}): {}",
+                status, text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct UserResponse {
+            user: crate::types::UserInfo,
+        }
+
+        let data: UserResponse = response.json().await?;
+        Ok(data.user)
+    }
+
+    /// Get all users in the realm
+    pub async fn get_users(&self) -> Result<Vec<crate::types::UserInfo>> {
+        let url = format!("{}/api/v1/users", self.config.site);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to get users ({}): {}",
+                status, text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct UsersResponse {
+            members: Vec<crate::types::UserInfo>,
+        }
+
+        let data: UsersResponse = response.json().await?;
+        Ok(data.members)
+    }
+
+    /// Get the bot's own user information
+    pub async fn get_own_user(&self) -> Result<crate::types::UserInfo> {
+        let url = format!("{}/api/v1/users/me", self.config.site);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to get own user ({}): {}",
+                status, text
+            )));
+        }
+
+        let data: crate::types::UserInfo = response.json().await?;
+        Ok(data)
+    }
+
+    /// Set typing indicator in a channel/topic
+    pub async fn set_typing(&self, channel: &str, topic: &str, is_typing: bool) -> Result<()> {
+        let url = format!("{}/api/v1/typing", self.config.site);
+
+        let op = if is_typing { "start" } else { "stop" };
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&[
+                ("op", op),
+                ("type", "channel"),
+                ("to", channel),
+                ("topic", topic),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to set typing ({}): {}",
+                status, text
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Update message flags (e.g., mark as read, star)
+    pub async fn update_message_flags(
+        &self,
+        messages: &[i64],
+        op: &str,  // "add" or "remove"
+        flag: &str, // "read", "starred", etc.
+    ) -> Result<()> {
+        let url = format!("{}/api/v1/messages/flags", self.config.site);
+
+        let messages_json = serde_json::to_string(messages)?;
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&[
+                ("messages", messages_json.as_str()),
+                ("op", op),
+                ("flag", flag),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to update flags ({}): {}",
+                status, text
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Mark messages as read
+    pub async fn mark_as_read(&self, messages: &[i64]) -> Result<()> {
+        self.update_message_flags(messages, "add", "read").await
+    }
+
+    /// Star/unstar a message
+    pub async fn set_starred(&self, message_id: i64, starred: bool) -> Result<()> {
+        let op = if starred { "add" } else { "remove" };
+        self.update_message_flags(&[message_id], op, "starred").await
+    }
+
+    /// Get a single message by ID
+    pub async fn get_message(&self, message_id: i64) -> Result<crate::types::Message> {
+        let url = format!("{}/api/v1/messages/{}", self.config.site, message_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to get message ({}): {}",
+                status, text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct MessageResponse {
+            message: crate::types::Message,
+        }
+
+        let data: MessageResponse = response.json().await?;
+        Ok(data.message)
+    }
+
     /// Register a queue for real-time events
     pub async fn register_queue(&self, event_types: &[&str]) -> Result<(String, i64)> {
         let url = format!("{}/api/v1/register", self.config.site);

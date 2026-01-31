@@ -34,12 +34,44 @@ impl Message {
     }
 }
 
-/// A user in the system
+/// A user in the system (minimal, for events)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct User {
     pub id: i64,
     pub email: String,
     pub full_name: String,
+}
+
+/// Full user information from the API
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UserInfo {
+    pub user_id: Option<i64>,  // Present in /users/me response
+    pub id: Option<i64>,       // Present in /users/{id} response
+    pub email: String,
+    pub full_name: String,
+    #[serde(default)]
+    pub is_bot: bool,
+    #[serde(default)]
+    pub is_active: bool,
+    #[serde(default)]
+    pub is_admin: bool,
+    #[serde(default)]
+    pub is_owner: bool,
+    #[serde(default)]
+    pub is_guest: bool,
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub date_joined: Option<String>,
+}
+
+impl UserInfo {
+    /// Get the user ID (handles both response formats)
+    pub fn get_id(&self) -> i64 {
+        self.user_id.or(self.id).unwrap_or(0)
+    }
 }
 
 /// An event from the Tulip event queue
