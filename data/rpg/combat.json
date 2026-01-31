@@ -1,0 +1,15 @@
+{
+  "clankerville:test": {
+    "combatants": [
+      {
+        "id": 9,
+        "name": "Desdemona",
+        "initiative": 4,
+        "is_npc": false
+      }
+    ],
+    "current_turn": null,
+    "round": 0,
+    "active": false
+  }
+}

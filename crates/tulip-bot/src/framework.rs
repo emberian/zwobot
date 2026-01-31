@@ -52,6 +52,45 @@ impl<D: Send + Sync + 'static> Framework<D> {
         Ok(())
     }
 
+    /// Sync commands with the Tulip server (register new, update existing, remove stale)
+    pub async fn sync_commands(&self) -> Result<()> {
+        // Get all commands registered on the server
+        let server_commands = self.client.list_commands().await?;
+        let bot_id = self.client.bot_id();
+
+        // Filter to just this bot's commands
+        let our_commands: std::collections::HashMap<String, i64> = server_commands
+            .iter()
+            .filter(|c| c.bot_id == bot_id)
+            .map(|c| (c.name.clone(), c.id))
+            .collect();
+
+        // Get the names of commands we're registering
+        let new_command_names: std::collections::HashSet<String> = self
+            .commands
+            .iter()
+            .map(|c| c.definition().name)
+            .collect();
+
+        // Unregister commands that are no longer in our list
+        for (name, id) in &our_commands {
+            if !new_command_names.contains(name) {
+                info!("Unregistering stale command /{} (id={})", name, id);
+                if let Err(e) = self.client.unregister_command(*id).await {
+                    warn!("Failed to unregister command /{}: {}", name, e);
+                }
+            }
+        }
+
+        // Register/update our commands
+        for cmd in &self.commands {
+            let def = cmd.definition();
+            self.client.register_command(&def).await?;
+        }
+
+        Ok(())
+    }
+
     /// Run the bot (main event loop)
     pub async fn run(&self) -> Result<()> {
         // Register for message, interaction, command invocation, and submessage events
@@ -125,7 +164,22 @@ impl<D: Send + Sync + 'static> Framework<D> {
                     event.message_id,
                     event.user.as_ref(),
                 ) {
-                    let arguments = event.arguments.clone().unwrap_or_default();
+                    // Convert JSON values to strings (handles numbers, bools, etc.)
+                    let arguments: std::collections::HashMap<String, String> = event
+                        .arguments
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|(k, v)| {
+                            let s = match v {
+                                serde_json::Value::String(s) => s,
+                                serde_json::Value::Number(n) => n.to_string(),
+                                serde_json::Value::Bool(b) => b.to_string(),
+                                other => other.to_string(),
+                            };
+                            (k, s)
+                        })
+                        .collect();
                     let (stream_id, topic) = event
                         .context
                         .as_ref()

@@ -65,8 +65,9 @@ pub struct Event {
     /// Command invocation fields (present when type == "command_invocation")
     #[serde(default)]
     pub command: Option<String>,
+    /// Arguments may contain strings, numbers, or booleans from JSON
     #[serde(default)]
-    pub arguments: Option<std::collections::HashMap<String, String>>,
+    pub arguments: Option<std::collections::HashMap<String, serde_json::Value>>,
     #[serde(default)]
     pub interaction_id: Option<String>,
     #[serde(default)]
@@ -115,8 +116,9 @@ pub struct CommandInvocationEvent {
     pub message_id: i64,
     pub interaction_id: String,
     pub command: String,
+    /// Arguments may contain strings, numbers, or booleans from JSON
     #[serde(default)]
-    pub arguments: std::collections::HashMap<String, String>,
+    pub arguments: std::collections::HashMap<String, serde_json::Value>,
     #[serde(default)]
     pub context: Option<InvocationContext>,
     pub user: User,
@@ -242,6 +244,43 @@ impl UpdatePersonaParams {
         self.bio = Some(bio.into());
         self
     }
+}
+
+/// A channel (stream) in Tulip
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Channel {
+    pub stream_id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub invite_only: bool,
+    #[serde(default)]
+    pub is_web_public: bool,
+    #[serde(default)]
+    pub history_public_to_subscribers: bool,
+}
+
+/// A topic within a channel
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Topic {
+    pub name: String,
+    pub max_id: i64,
+}
+
+/// A subscription to a channel
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Subscription {
+    pub stream_id: i64,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub is_muted: bool,
+    #[serde(default)]
+    pub pin_to_top: bool,
 }
 
 /// Configuration for connecting to Tulip

@@ -1579,7 +1579,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Load configs
     let app_config = AppConfig::load()?;
-    let tulip_config = TulipConfig::from_zuliprc("zuliprc")?;
+    let tulip_config = TulipConfig::from_zuliprc("test-zuliprc")?;
 
     info!("Monitoring channel: {}", app_config.channel);
 
@@ -1681,8 +1681,8 @@ async fn main() -> anyhow::Result<()> {
         .build(tulip_config)
         .await?;
 
-    // Register commands with Tulip
-    framework.register_commands().await?;
+    // Sync commands with Tulip (registers new, updates existing, removes stale)
+    framework.sync_commands().await?;
 
     // Spawn timer response handler
     let client_for_timers = framework.client().clone();

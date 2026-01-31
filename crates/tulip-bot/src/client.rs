@@ -52,6 +52,9 @@ pub struct RegisteredCommand {
     pub id: i64,
     pub name: String,
     pub description: String,
+    pub bot_id: i64,
+    #[serde(default)]
+    pub bot_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -276,15 +279,17 @@ impl TulipClient {
             return Ok(None);
         }
 
-        let content = response.content().unwrap_or("");
-
         // TODO: Handle ephemeral and private responses when Tulip API supports them
         // For now, just send as regular messages
 
         if let Some(widget) = response.widget() {
+            // Zulip requires non-empty content even for widget messages.
+            // Use zero-width space as placeholder if no content provided.
+            let content = response.content().unwrap_or("\u{200b}");
             let id = self.send_message_with_widget(channel, topic, content, widget).await?;
             Ok(Some(id))
         } else {
+            let content = response.content().unwrap_or("");
             let id = self.send_message(channel, topic, content).await?;
             Ok(Some(id))
         }
@@ -301,11 +306,60 @@ impl TulipClient {
             return Ok(None);
         }
 
-        let content = response.content().unwrap_or("");
+        if let Some(widget) = response.widget() {
+            // Zulip requires non-empty content even for widget messages.
+            // Use zero-width space as placeholder if no content provided.
+            let content = response.content().unwrap_or("\u{200b}");
+            let id = self.send_message_to_stream_id_with_widget(stream_id, topic, content, widget).await?;
+            Ok(Some(id))
+        } else {
+            let content = response.content().unwrap_or("");
+            let id = self.send_message_to_stream_id(stream_id, topic, content).await?;
+            Ok(Some(id))
+        }
+    }
 
-        // Use stream ID directly - Tulip/Zulip accepts either name or ID
-        let id = self.send_message_to_stream_id(stream_id, topic, content).await?;
-        Ok(Some(id))
+    /// Send a message with a widget to a stream by ID
+    pub async fn send_message_to_stream_id_with_widget(
+        &self,
+        stream_id: i64,
+        topic: &str,
+        content: &str,
+        widget: &Widget,
+    ) -> Result<i64> {
+        let url = format!("{}/api/v1/messages", self.config.site);
+
+        let widget_json = serde_json::to_string(widget)?;
+
+        let mut params = HashMap::new();
+        params.insert("type", "stream".to_string());
+        params.insert("to", stream_id.to_string());
+        params.insert("topic", topic.to_string());
+        params.insert("content", content.to_string());
+        params.insert("widget_content", widget_json);
+
+        trace!("Sending widget message to stream_id={}/{}", stream_id, topic);
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&params)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to send message with widget ({}): {}",
+                status, text
+            )));
+        }
+
+        let resp: SendMessageResponse = response.json().await?;
+        debug!("Widget message sent to stream_id={}/{}, id={}", stream_id, topic, resp.id);
+        Ok(resp.id)
     }
 
     /// Send a message to a stream by ID
@@ -442,6 +496,208 @@ impl TulipClient {
         Ok(())
     }
 
+    /// Get messages from a channel/topic
+    ///
+    /// # Arguments
+    /// * `channel` - Channel (stream) name
+    /// * `topic` - Topic name (optional, if None gets all messages from channel)
+    /// * `num_before` - Number of messages before anchor (default 100)
+    /// * `num_after` - Number of messages after anchor (default 0)
+    /// * `anchor` - Message ID anchor or "newest" (default "newest")
+    pub async fn get_messages(
+        &self,
+        channel: &str,
+        topic: Option<&str>,
+        num_before: Option<i64>,
+        num_after: Option<i64>,
+        anchor: Option<&str>,
+    ) -> Result<Vec<crate::types::Message>> {
+        let url = format!("{}/api/v1/messages", self.config.site);
+
+        // Build narrow filter
+        let mut narrow = vec![serde_json::json!({"operator": "channel", "operand": channel})];
+        if let Some(t) = topic {
+            narrow.push(serde_json::json!({"operator": "topic", "operand": t}));
+        }
+
+        let narrow_str = serde_json::to_string(&narrow).unwrap();
+        let num_before_str = num_before.unwrap_or(100).to_string();
+        let num_after_str = num_after.unwrap_or(0).to_string();
+        let anchor_str = anchor.unwrap_or("newest");
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .query(&[
+                ("narrow", narrow_str.as_str()),
+                ("num_before", &num_before_str),
+                ("num_after", &num_after_str),
+                ("anchor", anchor_str),
+                ("apply_markdown", "false"),
+            ])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to get messages ({}): {}",
+                status, text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct MessagesResponse {
+            messages: Vec<crate::types::Message>,
+        }
+
+        let data: MessagesResponse = response.json().await?;
+        Ok(data.messages)
+    }
+
+    /// List all channels (streams) the bot can access
+    pub async fn list_channels(&self) -> Result<Vec<crate::types::Channel>> {
+        let url = format!("{}/api/v1/streams", self.config.site);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to list channels ({}): {}",
+                status, text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct StreamsResponse {
+            streams: Vec<crate::types::Channel>,
+        }
+
+        let data: StreamsResponse = response.json().await?;
+        Ok(data.streams)
+    }
+
+    /// List topics in a channel
+    pub async fn list_topics(&self, stream_id: i64) -> Result<Vec<crate::types::Topic>> {
+        let url = format!("{}/api/v1/users/me/{}/topics", self.config.site, stream_id);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to list topics ({}): {}",
+                status, text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct TopicsResponse {
+            topics: Vec<crate::types::Topic>,
+        }
+
+        let data: TopicsResponse = response.json().await?;
+        Ok(data.topics)
+    }
+
+    /// Get the bot's current subscriptions
+    pub async fn get_subscriptions(&self) -> Result<Vec<crate::types::Subscription>> {
+        let url = format!("{}/api/v1/users/me/subscriptions", self.config.site);
+
+        let response = self
+            .client
+            .get(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to get subscriptions ({}): {}",
+                status, text
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct SubscriptionsResponse {
+            subscriptions: Vec<crate::types::Subscription>,
+        }
+
+        let data: SubscriptionsResponse = response.json().await?;
+        Ok(data.subscriptions)
+    }
+
+    /// Subscribe to a channel
+    pub async fn subscribe(&self, channel_name: &str) -> Result<()> {
+        let url = format!("{}/api/v1/users/me/subscriptions", self.config.site);
+
+        let subscriptions = serde_json::to_string(&[serde_json::json!({"name": channel_name})])?;
+
+        let response = self
+            .client
+            .post(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&[("subscriptions", subscriptions)])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to subscribe ({}): {}",
+                status, text
+            )));
+        }
+
+        info!("Subscribed to channel: {}", channel_name);
+        Ok(())
+    }
+
+    /// Unsubscribe from a channel
+    pub async fn unsubscribe(&self, channel_name: &str) -> Result<()> {
+        let url = format!("{}/api/v1/users/me/subscriptions", self.config.site);
+
+        let subscriptions = serde_json::to_string(&[channel_name])?;
+
+        let response = self
+            .client
+            .delete(&url)
+            .basic_auth(&self.config.email, Some(&self.config.key))
+            .form(&[("subscriptions", subscriptions)])
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(TulipError::Api(format!(
+                "Failed to unsubscribe ({}): {}",
+                status, text
+            )));
+        }
+
+        info!("Unsubscribed from channel: {}", channel_name);
+        Ok(())
+    }
+
     /// Register a queue for real-time events
     pub async fn register_queue(&self, event_types: &[&str]) -> Result<(String, i64)> {
         let url = format!("{}/api/v1/register", self.config.site);
@@ -501,8 +757,9 @@ impl TulipClient {
 
     /// Register a slash command with Tulip
     pub async fn register_command(&self, def: &CommandDef) -> Result<i64> {
-        let url = format!("{}/api/v1/bot_commands/register", self.config.site);
+        let url = format!("{}/api/v1/bot_commands", self.config.site);
 
+        // Tulip expects form-encoded data with options as a JSON string
         let options_json = serde_json::to_string(&def.options)?;
 
         let mut params = HashMap::new();

@@ -1,0 +1,33 @@
+[package]
+name = "tulip-mcp"
+description = "MCP server for Tulip chat integration - enables AI agents to interact with Tulip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "tulip-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# MCP SDK
+rmcp = { version = "0.14", features = ["server", "macros", "transport-io", "schemars"] }
+schemars = "0.8"
+
+# Tulip client
+tulip-bot = { path = "../tulip-bot", features = ["runtime"] }
+
+# Async runtime
+tokio.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Error handling
+thiserror.workspace = true
+anyhow.workspace = true
+
+# Logging (CRITICAL: must go to stderr, not stdout)
+tracing.workspace = true
+tracing-subscriber.workspace = true
