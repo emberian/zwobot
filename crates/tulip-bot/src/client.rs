@@ -615,6 +615,20 @@ impl TulipClient {
         Ok(data.topics)
     }
 
+    /// List topics in a channel by name
+    ///
+    /// Convenience wrapper that looks up the stream ID first.
+    pub async fn list_topics_by_name(&self, channel: &str) -> Result<Vec<crate::types::Topic>> {
+        let channels = self.list_channels().await?;
+        let stream_id = channels
+            .iter()
+            .find(|c| c.name.eq_ignore_ascii_case(channel))
+            .map(|c| c.stream_id)
+            .ok_or_else(|| TulipError::Api(format!("Channel '{}' not found", channel)))?;
+
+        self.list_topics(stream_id).await
+    }
+
     /// Get the bot's current subscriptions
     pub async fn get_subscriptions(&self) -> Result<Vec<crate::types::Subscription>> {
         let url = format!("{}/api/v1/users/me/subscriptions", self.config.site);

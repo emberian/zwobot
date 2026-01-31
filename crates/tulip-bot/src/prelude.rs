@@ -14,8 +14,8 @@ pub use crate::interaction::{
 };
 pub use crate::response::Response;
 pub use crate::types::{
-    CreatePersonaParams, Event, Message, Persona, RealmPersona, TulipConfig, UpdatePersonaParams,
-    User,
+    Channel, CreatePersonaParams, Event, Message, Persona, RealmPersona, Subscription, Topic,
+    TulipConfig, UpdatePersonaParams, User, UserInfo,
 };
 pub use crate::widget::{
     ActionRow, Button, ButtonStyle, Component, Freeform, Interactive, Modal, RichEmbed,

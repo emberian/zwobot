@@ -1,0 +1,22 @@
+[package]
+name = "tulip-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Command-line interface for Tulip chat"
+license = "MIT"
+
+[[bin]]
+name = "tulip"
+path = "src/main.rs"
+
+[dependencies]
+tulip-bot = { path = "../tulip-bot" }
+clap = { version = "4", features = ["derive", "env"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+colored = "2"
+dirs = "5"
+chrono = "0.4"
+reqwest = { version = "0.11", features = ["json"] }

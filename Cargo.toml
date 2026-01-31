@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/tulip-bot",
     "crates/tulip-mcp",
+    "crates/tulip-cli",
     "crates/llm",
     "crates/debate",
     "crates/spweencraft",
